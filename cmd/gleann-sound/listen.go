@@ -45,16 +45,22 @@ const (
 // newListenCmd creates the "listen" subcommand (Mode 2: Live CLI Stream).
 func newListenCmd() *cobra.Command {
 	var outputFile string
+	var sourceFlag string
 
 	cmd := &cobra.Command{
 		Use:   "listen",
-		Short: "Live microphone transcription streamed as JSON to stdout",
+		Short: "Live audio transcription streamed as JSON to stdout",
 		Long: `Mode 2 — Live CLI Streaming.
 
-Captures audio from the default input device, uses energy-based Voice Activity
-Detection to detect utterance boundaries, and sends each complete utterance
-through Whisper.  Results are written to stdout as JSON objects.
-Optionally, output can also be written to a file with --output.
+Captures audio from the selected source (microphone, speaker/loopback, or both),
+uses energy-based Voice Activity Detection to detect utterance boundaries, and
+sends each complete utterance through Whisper. Results are written to stdout as
+JSON objects. Optionally, output can also be written to a file with --output.
+
+Audio sources:
+  mic      — Default microphone input (default)
+  speaker  — System audio output (loopback/desktop audio)
+  both     — Microphone and speaker simultaneously
 
 Press Ctrl+C to stop.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -76,7 +82,23 @@ Press Ctrl+C to stop.`,
 				engine.SetLanguage(lang)
 			}
 
-			capturer := audio.NewMalgoCapturer()
+			// ── Audio source selection ─────────────────────────────
+			src := sourceFlag
+			if src == "" {
+				// Check config for default source.
+				if cfg := config.Load(); cfg != nil && cfg.AudioSource != "" {
+					src = cfg.AudioSource
+				} else {
+					src = "mic"
+				}
+			}
+			audioSource, err := audio.ParseAudioSource(src)
+			if err != nil {
+				return err
+			}
+			log.Printf("[listen] audio source: %s", audioSource)
+
+			capturer := audio.NewMalgoCapturerWithSource(audioSource)
 			vad := audio.DefaultVAD()
 
 			// ── Signal handling ────────────────────────────────────
@@ -264,6 +286,8 @@ Press Ctrl+C to stop.`,
 
 	cmd.Flags().StringVarP(&outputFile, "output", "o", "",
 		"Write transcription output to this file (in addition to stdout)")
+	cmd.Flags().StringVarP(&sourceFlag, "source", "s", "",
+		"Audio source: mic (default), speaker (loopback/desktop audio), both")
 	cmd.Flags().String("language", "",
 		"Language code for transcription (e.g. tr, en, de). Empty = auto-detect")
 

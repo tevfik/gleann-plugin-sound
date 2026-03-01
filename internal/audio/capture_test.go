@@ -14,6 +14,58 @@ import (
 // Tests that actually open audio devices require hardware access and are skipped
 // in headless CI environments (no PulseAudio / PipeWire).
 
+// ── AudioSource parsing ────────────────────────────────────────
+
+func TestParseAudioSource(t *testing.T) {
+	tests := []struct {
+		input   string
+		want    AudioSource
+		wantErr bool
+	}{
+		{"mic", SourceMic, false},
+		{"microphone", SourceMic, false},
+		{"speaker", SourceSpeaker, false},
+		{"loopback", SourceSpeaker, false},
+		{"desktop", SourceSpeaker, false},
+		{"both", SourceBoth, false},
+		{"all", SourceBoth, false},
+		{"invalid", SourceMic, true},
+		{"", SourceMic, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got, err := ParseAudioSource(tt.input)
+			if tt.wantErr && err == nil {
+				t.Errorf("ParseAudioSource(%q): expected error", tt.input)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("ParseAudioSource(%q): unexpected error: %v", tt.input, err)
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Errorf("ParseAudioSource(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAudioSourceString(t *testing.T) {
+	tests := []struct {
+		src  AudioSource
+		want string
+	}{
+		{SourceMic, "mic"},
+		{SourceSpeaker, "speaker"},
+		{SourceBoth, "both"},
+	}
+	for _, tt := range tests {
+		if got := tt.src.String(); got != tt.want {
+			t.Errorf("AudioSource(%d).String() = %q, want %q", tt.src, got, tt.want)
+		}
+	}
+}
+
+// ── Constructor tests ──────────────────────────────────────────
+
 func TestNewMalgoCapturer(t *testing.T) {
 	c := NewMalgoCapturer()
 	if c == nil {
@@ -22,7 +74,24 @@ func TestNewMalgoCapturer(t *testing.T) {
 	if c.running {
 		t.Error("new capturer should not be running")
 	}
+	if c.source != SourceMic {
+		t.Errorf("default source should be SourceMic, got %v", c.source)
+	}
 }
+
+func TestNewMalgoCapturerWithSource(t *testing.T) {
+	for _, src := range []AudioSource{SourceMic, SourceSpeaker, SourceBoth} {
+		c := NewMalgoCapturerWithSource(src)
+		if c == nil {
+			t.Fatalf("NewMalgoCapturerWithSource(%v) returned nil", src)
+		}
+		if c.source != src {
+			t.Errorf("source = %v, want %v", c.source, src)
+		}
+	}
+}
+
+// ── Lifecycle tests ────────────────────────────────────────────
 
 func TestMalgoCapturer_StopWhenNotRunning(t *testing.T) {
 	c := NewMalgoCapturer()
@@ -32,21 +101,16 @@ func TestMalgoCapturer_StopWhenNotRunning(t *testing.T) {
 	}
 }
 
-func TestMalgoCapturer_StartRequiresHardware(t *testing.T) {
-	// Attempt to start capture — this will fail in environments without
-	// audio hardware (CI, containers) but should return a clean error.
-	c := NewMalgoCapturer()
+func TestMalgoCapturer_StartMic(t *testing.T) {
+	c := NewMalgoCapturerWithSource(SourceMic)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
 	err := c.Start(ctx, func(pcm []int16) {})
 	if err != nil {
-		// Expected in headless environments — just log it.
-		t.Logf("Start returned expected error (no audio device): %v", err)
+		t.Logf("Start(mic) returned expected error (no audio device): %v", err)
 		return
 	}
-
-	// If it succeeded, we're on a real machine — clean up.
 	defer c.Stop()
 
 	// Should not be able to start twice.
@@ -54,6 +118,33 @@ func TestMalgoCapturer_StartRequiresHardware(t *testing.T) {
 	if err == nil {
 		t.Error("starting an already-running capturer should return an error")
 	}
+}
+
+func TestMalgoCapturer_StartSpeaker(t *testing.T) {
+	c := NewMalgoCapturerWithSource(SourceSpeaker)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	err := c.Start(ctx, func(pcm []int16) {})
+	if err != nil {
+		// Loopback may not be supported on all platforms.
+		t.Logf("Start(speaker) returned expected error: %v", err)
+		return
+	}
+	defer c.Stop()
+}
+
+func TestMalgoCapturer_StartBoth(t *testing.T) {
+	c := NewMalgoCapturerWithSource(SourceBoth)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	err := c.Start(ctx, func(pcm []int16) {})
+	if err != nil {
+		t.Logf("Start(both) returned expected error: %v", err)
+		return
+	}
+	defer c.Stop()
 }
 
 func TestMalgoCapturer_ContextCancelsCapture(t *testing.T) {
@@ -79,7 +170,8 @@ func TestMalgoCapturer_ContextCancelsCapture(t *testing.T) {
 	}
 }
 
-// TestWhisperConstants verifies the exported audio format constants.
+// ── Constants ──────────────────────────────────────────────────
+
 func TestWhisperConstants(t *testing.T) {
 	if WhisperSampleRate != 16000 {
 		t.Errorf("WhisperSampleRate: want 16000, got %d", WhisperSampleRate)

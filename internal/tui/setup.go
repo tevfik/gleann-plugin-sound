@@ -26,6 +26,7 @@ const (
 	phaseGRPC                            // gRPC server configuration
 	phaseBackend                         // backend selection (whisper / onnx)
 	phaseOutput                          // output directory for transcriptions
+	phaseAudioSource                     // audio source selection (mic / speaker / both)
 	phaseSummary                         // summary & confirm
 )
 
@@ -86,6 +87,10 @@ type SetupModel struct {
 	// Output directory.
 	outputDir     string // output directory for transcription files
 	outputEditing bool   // user is editing the path
+
+	// Audio source.
+	audioSourceOptions []string // available sources (mic, speaker, both)
+	audioSourceCursor  int      // cursor position
 
 	// Result.
 	result *config.Config
@@ -153,6 +158,7 @@ func NewSetupModel(existingCfg *config.Config) SetupModel {
 	grpcAddr := "localhost:50051"
 	backendCursor := 0 // 0 = whisper
 	outputDir := "~/.gleann/transcriptions"
+	audioSourceCursor := 0 // 0 = mic
 	if existingCfg != nil {
 		existingDefault = existingCfg.DefaultModel
 		if existingCfg.GRPCAddr != "" {
@@ -164,6 +170,12 @@ func NewSetupModel(existingCfg *config.Config) SetupModel {
 		}
 		if existingCfg.OutputDir != "" {
 			outputDir = existingCfg.OutputDir
+		}
+		switch existingCfg.AudioSource {
+		case "speaker":
+			audioSourceCursor = 1
+		case "both":
+			audioSourceCursor = 2
 		}
 		for i, l := range defaultLanguages {
 			if l.code == existingCfg.Language {
@@ -206,6 +218,8 @@ func NewSetupModel(existingCfg *config.Config) SetupModel {
 		backendOptions:       []string{"whisper", "onnx"},
 		backendCursor:        backendCursor,
 		outputDir:            outputDir,
+		audioSourceOptions:   []string{"mic", "speaker", "both"},
+		audioSourceCursor:    audioSourceCursor,
 	}
 }
 
@@ -308,6 +322,8 @@ func (m SetupModel) handlePhaseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updateBackend(msg)
 	case phaseOutput:
 		return m.updateOutput(msg)
+	case phaseAudioSource:
+		return m.updateAudioSource(msg)
 	case phaseSummary:
 		return m.updateSummary(msg)
 	}
@@ -553,7 +569,7 @@ func (m SetupModel) updateOutput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if m.outputDir != "" {
 				m.outputEditing = false
-				m.phase = phaseSummary
+				m.phase = phaseAudioSource
 			}
 		case "backspace":
 			if len(m.outputDir) > 0 {
@@ -572,6 +588,24 @@ func (m SetupModel) updateOutput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "e":
 		m.outputEditing = true
+	case "enter":
+		m.phase = phaseAudioSource
+	}
+	return m, nil
+}
+
+// ── Audio Source ───────────────────────────────────────────────
+
+func (m SetupModel) updateAudioSource(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "up", "k":
+		if m.audioSourceCursor > 0 {
+			m.audioSourceCursor--
+		}
+	case "down", "j":
+		if m.audioSourceCursor < len(m.audioSourceOptions)-1 {
+			m.audioSourceCursor++
+		}
 	case "enter":
 		m.phase = phaseSummary
 	}
@@ -623,6 +657,7 @@ func (m SetupModel) buildConfig() *config.Config {
 		Hotkey:        hotkey,
 		Models:        m.installedModels,
 		Backend:       m.backendOptions[m.backendCursor],
+		AudioSource:   m.audioSourceOptions[m.audioSourceCursor],
 		OutputDir:     m.outputDir,
 		Completed:     true,
 	}
@@ -702,6 +737,8 @@ func (m SetupModel) View() string {
 		b.WriteString(m.viewBackend())
 	case phaseOutput:
 		b.WriteString(m.viewOutput())
+	case phaseAudioSource:
+		b.WriteString(m.viewAudioSource())
 	case phaseSummary:
 		b.WriteString(m.viewSummary())
 	}
@@ -974,6 +1011,49 @@ func (m SetupModel) viewOutput() string {
 	return b.String()
 }
 
+func (m SetupModel) viewAudioSource() string {
+	var b strings.Builder
+	b.WriteString("  Select audio source for listen mode:\n")
+	b.WriteString("  " + lipgloss.NewStyle().Foreground(ColorDimFg).Render("Choose what audio to capture for live transcription") + "\n\n")
+
+	descriptions := map[string]string{
+		"mic":     "Microphone — Default input device (voice)",
+		"speaker": "Speaker — System audio / loopback (desktop audio)",
+		"both":    "Both — Microphone + Speaker simultaneously",
+	}
+
+	hints := map[string]string{
+		"mic":     "",
+		"speaker": " (Linux: PulseAudio monitor, Windows: WASAPI loopback)",
+		"both":    " (mixes mic + system audio into one stream)",
+	}
+
+	for i, opt := range m.audioSourceOptions {
+		cursor := "  "
+		if i == m.audioSourceCursor {
+			cursor = "▸ "
+		}
+		label := descriptions[opt]
+		if label == "" {
+			label = opt
+		}
+		line := cursor + label
+		if i == m.audioSourceCursor && hints[opt] != "" {
+			line += lipgloss.NewStyle().Foreground(ColorDimFg).Render(hints[opt])
+		}
+		if i == m.audioSourceCursor {
+			b.WriteString(ActiveItemStyle.Render(line))
+		} else {
+			b.WriteString(NormalItemStyle.Render(line))
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n")
+	b.WriteString(StatusBarStyle.Render("  ↑/↓ navigate • enter select • esc back"))
+	return b.String()
+}
+
 func (m SetupModel) viewSummary() string {
 	var b strings.Builder
 	b.WriteString("  Configuration Summary:\n\n")
@@ -996,6 +1076,7 @@ func (m SetupModel) viewSummary() string {
 	}
 
 	backend := m.backendOptions[m.backendCursor]
+	audioSource := m.audioSourceOptions[m.audioSourceCursor]
 	outputDir := m.outputDir
 	if outputDir == "" {
 		outputDir = "(not set)"
@@ -1006,6 +1087,7 @@ func (m SetupModel) viewSummary() string {
 		{"Language", lang},
 		{"Dictation Hotkey", hotkey},
 		{"Backend", backend},
+		{"Audio Source", audioSource},
 		{"Output Directory", outputDir},
 		{"gRPC Server", grpcStatus},
 		{"Models Installed", fmt.Sprintf("%d", len(m.installedModels))},

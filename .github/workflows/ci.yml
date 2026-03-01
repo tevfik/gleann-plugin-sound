@@ -46,9 +46,23 @@ jobs:
           name: coverage
           path: coverage.out
 
+  # ── Cross-platform stub build check ──
   build-stub:
-    name: Build Check (stub)
-    runs-on: ubuntu-latest
+    name: Build Stub (${{ matrix.os-label }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            os-label: linux-amd64
+            goos: linux
+          - runner: macos-latest
+            os-label: darwin-arm64
+            goos: darwin
+          - runner: windows-latest
+            os-label: windows-amd64
+            goos: windows
+
     steps:
       - uses: actions/checkout@v4
 
@@ -57,16 +71,18 @@ jobs:
         with:
           go-version: "1.24"
 
-      - name: Install system dependencies
+      - name: Install system dependencies (Linux)
+        if: matrix.goos == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libx11-dev libxtst-dev libxinerama-dev
 
       - name: Build (stub, no whisper.cpp)
-        run: make build-stub
+        shell: bash
+        run: CGO_ENABLED=1 go build -trimpath -o gleann-sound-stub ./cmd/gleann-sound/
 
   build-onnx:
-    name: Build Check (ONNX Runtime)
+    name: Build ONNX (linux-amd64)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -92,7 +108,7 @@ jobs:
         run: make build-onnx
 
   build-whisper:
-    name: Build Check (whisper.cpp)
+    name: Build Whisper (linux-amd64)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

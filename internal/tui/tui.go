@@ -141,6 +141,9 @@ func runCLIMode(cfg *config.Config, mode string) {
 		if (mode == "listen" || mode == "transcribe") && cfg.OutputDir != "" {
 			args = append(args, "--output", cfg.OutputDir)
 		}
+		if mode == "listen" && cfg.AudioSource != "" && cfg.AudioSource != "mic" {
+			args = append(args, "--source", cfg.AudioSource)
+		}
 		if mode == "test" && cfg.Hotkey != "" {
 			args = append(args, "--key", cfg.Hotkey)
 		}

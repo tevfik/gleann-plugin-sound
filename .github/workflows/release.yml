@@ -28,14 +28,39 @@ jobs:
       - name: Test
         run: go test -race -count=1 -timeout 60s ./...
 
-  # ── Stub build (linux-amd64, no whisper.cpp) ──
-  # NOTE: arm64 removed — robotgo requires CGO + native X11 headers,
-  # cross-compiling from amd64 would need gcc-aarch64-linux-gnu + arm64
-  # X11 dev packages. Add back when arm64 runners are available.
+  # ── Stub build (all platforms, no whisper.cpp / no ONNX) ──
+  # Requires CGO for robotgo (keyboard injection) and malgo (audio capture).
   release-stub:
-    name: Build Stub (linux-amd64)
+    name: Stub (${{ matrix.os-label }})
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            os-label: linux-amd64
+            ext: ""
+            archive: tar.gz
+          - runner: macos-latest
+            goos: darwin
+            goarch: arm64
+            os-label: darwin-arm64
+            ext: ""
+            archive: tar.gz
+          - runner: macos-13
+            goos: darwin
+            goarch: amd64
+            os-label: darwin-amd64
+            ext: ""
+            archive: tar.gz
+          - runner: windows-latest
+            goos: windows
+            goarch: amd64
+            os-label: windows-amd64
+            ext: ".exe"
+            archive: zip
 
     steps:
       - uses: actions/checkout@v4
@@ -45,30 +70,43 @@ jobs:
         with:
           go-version: "1.24"
 
-      - name: Install system dependencies
+      - name: Install system dependencies (Linux)
+        if: matrix.goos == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libx11-dev libxtst-dev libxinerama-dev
 
       - name: Determine version
         id: version
+        shell: bash
         run: echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
 
       - name: Build gleann-sound (stub)
+        shell: bash
         env:
-          GOOS: linux
-          GOARCH: amd64
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "1"
         run: |
-          BINARY="gleann-sound-stub-${{ steps.version.outputs.version }}-linux-amd64"
+          BINARY="gleann-sound-stub-${{ steps.version.outputs.version }}-${{ matrix.os-label }}${{ matrix.ext }}"
           LDFLAGS="-s -w -X main.version=${{ steps.version.outputs.version }}"
           go build -trimpath -ldflags "$LDFLAGS" -o "$BINARY" ./cmd/gleann-sound/
 
-      - name: Compress binary
+      - name: Compress binary (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
         run: |
           mkdir -p dist
-          tar czf "dist/gleann-sound-stub-${{ steps.version.outputs.version }}-linux-amd64.tar.gz" \
-            gleann-sound-stub-${{ steps.version.outputs.version }}-linux-amd64
+          tar czf "dist/gleann-sound-stub-${{ steps.version.outputs.version }}-${{ matrix.os-label }}.tar.gz" \
+            gleann-sound-stub-${{ steps.version.outputs.version }}-${{ matrix.os-label }}
+
+      - name: Compress binary (zip)
+        if: matrix.archive == 'zip'
+        shell: bash
+        run: |
+          mkdir -p dist
+          7z a "dist/gleann-sound-stub-${{ steps.version.outputs.version }}-${{ matrix.os-label }}.zip" \
+            "gleann-sound-stub-${{ steps.version.outputs.version }}-${{ matrix.os-label }}${{ matrix.ext }}"
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
@@ -76,11 +114,42 @@ jobs:
           files: dist/*
           generate_release_notes: true
 
-  # ── Full build with whisper.cpp (Linux amd64 only, requires CGo) ──
+  # ── Whisper.cpp build (all platforms, CGO required) ──
   release-whisper:
-    name: Build Whisper (linux-amd64)
+    name: Whisper (${{ matrix.os-label }})
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            os-label: linux-amd64
+            ext: ""
+            archive: tar.gz
+            cmake-extra: ""
+          - runner: macos-latest
+            goos: darwin
+            goarch: arm64
+            os-label: darwin-arm64
+            ext: ""
+            archive: tar.gz
+            cmake-extra: "-DGGML_METAL=OFF"
+          - runner: macos-13
+            goos: darwin
+            goarch: amd64
+            os-label: darwin-amd64
+            ext: ""
+            archive: tar.gz
+            cmake-extra: "-DGGML_METAL=OFF"
+          - runner: windows-latest
+            goos: windows
+            goarch: amd64
+            os-label: windows-amd64
+            ext: ".exe"
+            archive: zip
+            cmake-extra: ""
 
     steps:
       - uses: actions/checkout@v4
@@ -90,32 +159,75 @@ jobs:
         with:
           go-version: "1.24"
 
-      - name: Install system dependencies
+      - name: Install system dependencies (Linux)
+        if: matrix.goos == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libx11-dev libxtst-dev libxinerama-dev cmake build-essential
 
+      - name: Install system dependencies (macOS)
+        if: matrix.goos == 'darwin'
+        run: brew install cmake
+
       - name: Build whisper.cpp (CPU-only)
-        run: make whisper-setup
+        shell: bash
+        run: |
+          WHISPER_DIR="$HOME/whisper.cpp"
+          git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git "$WHISPER_DIR"
+          mkdir -p "$WHISPER_DIR/build"
+          cd "$WHISPER_DIR/build"
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_CUDA=OFF \
+            -DGGML_VULKAN=OFF \
+            -DGGML_SYCL=OFF \
+            -DWHISPER_BUILD_EXAMPLES=OFF \
+            -DWHISPER_BUILD_TESTS=OFF \
+            -DBUILD_SHARED_LIBS=OFF \
+            ${{ matrix.cmake-extra }}
+          cmake --build . --config Release -j$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
 
       - name: Determine version
         id: version
+        shell: bash
         run: echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
 
       - name: Build gleann-sound (whisper)
+        shell: bash
         run: |
-          BINARY="gleann-sound-${{ steps.version.outputs.version }}-linux-amd64"
+          WHISPER_DIR="$HOME/whisper.cpp"
+          BINARY="gleann-sound-${{ steps.version.outputs.version }}-${{ matrix.os-label }}${{ matrix.ext }}"
           LDFLAGS="-s -w -X main.version=${{ steps.version.outputs.version }}"
+
+          # Platform-specific linker flags
+          if [ "${{ matrix.goos }}" = "linux" ]; then
+            EXTRA_LDFLAGS="-lm -lstdc++ -lpthread -lgomp"
+          elif [ "${{ matrix.goos }}" = "darwin" ]; then
+            EXTRA_LDFLAGS="-lm -lc++ -lpthread -framework Accelerate"
+          elif [ "${{ matrix.goos }}" = "windows" ]; then
+            EXTRA_LDFLAGS="-lstdc++ -lpthread"
+          fi
+
           CGO_ENABLED=1 \
-          CGO_CFLAGS="-I$HOME/whisper.cpp/include -I$HOME/whisper.cpp/ggml/include" \
-          CGO_LDFLAGS="-L$HOME/whisper.cpp/build/src -L$HOME/whisper.cpp/build/ggml/src -lwhisper -lggml -lggml-cpu -lggml-base -lm -lstdc++ -lpthread -lgomp" \
+          CGO_CFLAGS="-I$WHISPER_DIR/include -I$WHISPER_DIR/ggml/include" \
+          CGO_LDFLAGS="-L$WHISPER_DIR/build/src -L$WHISPER_DIR/build/ggml/src -lwhisper -lggml -lggml-cpu -lggml-base $EXTRA_LDFLAGS" \
           go build -trimpath -tags whisper -ldflags "$LDFLAGS" -o "$BINARY" ./cmd/gleann-sound/
 
-      - name: Compress binary
+      - name: Compress binary (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
         run: |
           mkdir -p dist
-          tar czf "dist/gleann-sound-${{ steps.version.outputs.version }}-linux-amd64.tar.gz" \
-            gleann-sound-${{ steps.version.outputs.version }}-linux-amd64
+          tar czf "dist/gleann-sound-${{ steps.version.outputs.version }}-${{ matrix.os-label }}.tar.gz" \
+            gleann-sound-${{ steps.version.outputs.version }}-${{ matrix.os-label }}
+
+      - name: Compress binary (zip)
+        if: matrix.archive == 'zip'
+        shell: bash
+        run: |
+          mkdir -p dist
+          7z a "dist/gleann-sound-${{ steps.version.outputs.version }}-${{ matrix.os-label }}.zip" \
+            "gleann-sound-${{ steps.version.outputs.version }}-${{ matrix.os-label }}${{ matrix.ext }}"
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
@@ -125,7 +237,7 @@ jobs:
 
   # ── ONNX Runtime build (Linux amd64 only) ──
   release-onnx:
-    name: Build ONNX (linux-amd64)
+    name: ONNX (linux-amd64)
     needs: test
     runs-on: ubuntu-latest
 

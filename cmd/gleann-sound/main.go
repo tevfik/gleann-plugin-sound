@@ -63,6 +63,7 @@ Run 'gleann-sound tui' for interactive setup and configuration.`,
 		newDictateCmd(),
 		newTUICmd(),
 		newTestCmd(),
+		newDevicesCmd(),
 	)
 
 	if err := root.Execute(); err != nil {

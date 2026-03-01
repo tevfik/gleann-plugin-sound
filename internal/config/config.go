@@ -27,6 +27,9 @@ type Config struct {
 	// Backend selection.
 	Backend string `json:"backend,omitempty"` // "whisper" (default) or "onnx"
 
+	// Audio source: "mic" (default), "speaker" (loopback), "both".
+	AudioSource string `json:"audio_source,omitempty"`
+
 	// Output directory for transcription results.
 	OutputDir string `json:"output_dir,omitempty"` // e.g. "~/transcriptions"
 

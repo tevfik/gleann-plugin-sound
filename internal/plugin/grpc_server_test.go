@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -91,9 +92,14 @@ func TestGRPCServer_StartTranscription(t *testing.T) {
 		},
 	}
 
-	var receivedEvents []core.TranscriptionEvent
+	var (
+		mu             sync.Mutex
+		receivedEvents []core.TranscriptionEvent
+	)
 	handler := func(event core.TranscriptionEvent) {
+		mu.Lock()
 		receivedEvents = append(receivedEvents, event)
+		mu.Unlock()
 	}
 
 	srv := NewGRPCServer(cap, tr, handler)
@@ -122,7 +128,10 @@ func TestGRPCServer_StartTranscription(t *testing.T) {
 	cancel() // Stop the transcription loop.
 	time.Sleep(100 * time.Millisecond)
 
-	if len(receivedEvents) == 0 {
+	mu.Lock()
+	n := len(receivedEvents)
+	mu.Unlock()
+	if n == 0 {
 		t.Error("expected at least one transcription event")
 	}
 }
