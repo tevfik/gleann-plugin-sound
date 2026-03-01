@@ -1,0 +1,18 @@
+# Build output
+build/
+
+# Whisper models (large binary files)
+models/*.bin
+
+# Coverage
+coverage.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,176 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Test before release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxtst-dev libxinerama-dev
+
+      - name: Test
+        run: go test -race -count=1 -timeout 60s ./...
+
+  # ── Stub build (linux-amd64, no whisper.cpp) ──
+  # NOTE: arm64 removed — robotgo requires CGO + native X11 headers,
+  # cross-compiling from amd64 would need gcc-aarch64-linux-gnu + arm64
+  # X11 dev packages. Add back when arm64 runners are available.
+  release-stub:
+    name: Build Stub (linux-amd64)
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxtst-dev libxinerama-dev
+
+      - name: Determine version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+      - name: Build gleann-sound (stub)
+        env:
+          GOOS: linux
+          GOARCH: amd64
+          CGO_ENABLED: "1"
+        run: |
+          BINARY="gleann-sound-stub-${{ steps.version.outputs.version }}-linux-amd64"
+          LDFLAGS="-s -w -X main.version=${{ steps.version.outputs.version }}"
+          go build -trimpath -ldflags "$LDFLAGS" -o "$BINARY" ./cmd/gleann-sound/
+
+      - name: Compress binary
+        run: |
+          mkdir -p dist
+          tar czf "dist/gleann-sound-stub-${{ steps.version.outputs.version }}-linux-amd64.tar.gz" \
+            gleann-sound-stub-${{ steps.version.outputs.version }}-linux-amd64
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+  # ── Full build with whisper.cpp (Linux amd64 only, requires CGo) ──
+  release-whisper:
+    name: Build Whisper (linux-amd64)
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxtst-dev libxinerama-dev cmake build-essential
+
+      - name: Build whisper.cpp (CPU-only)
+        run: make whisper-setup
+
+      - name: Determine version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+      - name: Build gleann-sound (whisper)
+        run: |
+          BINARY="gleann-sound-${{ steps.version.outputs.version }}-linux-amd64"
+          LDFLAGS="-s -w -X main.version=${{ steps.version.outputs.version }}"
+          CGO_ENABLED=1 \
+          CGO_CFLAGS="-I$HOME/whisper.cpp/include -I$HOME/whisper.cpp/ggml/include" \
+          CGO_LDFLAGS="-L$HOME/whisper.cpp/build/src -L$HOME/whisper.cpp/build/ggml/src -lwhisper -lggml -lggml-cpu -lggml-base -lm -lstdc++ -lpthread -lgomp" \
+          go build -trimpath -tags whisper -ldflags "$LDFLAGS" -o "$BINARY" ./cmd/gleann-sound/
+
+      - name: Compress binary
+        run: |
+          mkdir -p dist
+          tar czf "dist/gleann-sound-${{ steps.version.outputs.version }}-linux-amd64.tar.gz" \
+            gleann-sound-${{ steps.version.outputs.version }}-linux-amd64
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+  # ── ONNX Runtime build (Linux amd64 only) ──
+  release-onnx:
+    name: Build ONNX (linux-amd64)
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxtst-dev libxinerama-dev
+
+      - name: Install ONNX Runtime
+        run: |
+          ORT_VERSION="1.22.0"
+          curl -sSL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz" \
+            | sudo tar xz -C /usr/local --strip-components=1
+          sudo ldconfig
+
+      - name: Determine version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+      - name: Build gleann-sound (onnx)
+        env:
+          GOOS: linux
+          GOARCH: amd64
+          CGO_ENABLED: "1"
+        run: |
+          BINARY="gleann-sound-onnx-${{ steps.version.outputs.version }}-linux-amd64"
+          LDFLAGS="-s -w -X main.version=${{ steps.version.outputs.version }}"
+          go build -trimpath -tags onnx -ldflags "$LDFLAGS" -o "$BINARY" ./cmd/gleann-sound/
+
+      - name: Compress binary
+        run: |
+          mkdir -p dist
+          tar czf "dist/gleann-sound-onnx-${{ steps.version.outputs.version }}-linux-amd64.tar.gz" \
+            gleann-sound-onnx-${{ steps.version.outputs.version }}-linux-amd64
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
