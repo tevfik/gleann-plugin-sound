@@ -1,24 +1,29 @@
-# gleann-sound Makefile
-# Build targets for the gleann-sound binary with and without CGO dependencies.
+# gleann-plugin-sound Makefile
+# Build targets for the gleann-plugin-sound binary with and without CGO dependencies.
 
-BINARY     := gleann-sound
-CMD_DIR    := ./cmd/gleann-sound
+BINARY     := gleann-plugin-sound
+CMD_DIR    := ./cmd/gleann-plugin-sound
 BUILD_DIR  := ./build
 WHISPER_MODEL ?= models/ggml-base.en.bin
 
 # Go toolchain
-GO     := go
-GOFLAGS := -trimpath
+GO      := go
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+LDFLAGS := -s -w -X main.version=$(VERSION)
+GOFLAGS := -trimpath -ldflags "$(LDFLAGS)"
 
 # CGO flags for whisper.cpp — adjust WHISPER_DIR to your local path.
 WHISPER_DIR ?= $(HOME)/whisper.cpp
 CGO_CFLAGS  := -I$(WHISPER_DIR)/include -I$(WHISPER_DIR)/ggml/include
 CGO_LDFLAGS := -L$(WHISPER_DIR)/build/src -L$(WHISPER_DIR)/build/ggml/src -lwhisper -lggml -lggml-cpu -lggml-base -lm -lstdc++ -lpthread -lgomp
 
-.PHONY: all build build-onnx build-all build-stub clean test lint run-dictate whisper-setup whisper-model onnx-model install setup-input
+.PHONY: all build build-onnx build-all build-stub clean test lint run-dictate whisper-setup whisper-model onnx-model silero-model install setup-input release
 
 # ─── Default ──────────────────────────────────────────────────────────
+.PHONY: all build
 all: build
+build: whisper-build
+
 
 # ─── Download, build, and install whisper.cpp (CPU-only) ──────────────
 # This clones whisper.cpp into WHISPER_DIR and builds a static library.
@@ -67,7 +72,8 @@ whisper-model:
 	fi
 
 # ─── Full build with whisper.cpp CGO ──────────────────────────────────
-build:
+.PHONY: whisper-build
+whisper-build:
 	@echo "==> Building $(BINARY) with CGO (whisper.cpp)..."
 	@mkdir -p $(BUILD_DIR)
 	CGO_ENABLED=1 \
@@ -117,6 +123,21 @@ onnx-model:
 	done
 	@echo "==> ONNX model saved to $(ONNX_MODEL_DIR)/"
 
+# ─── Download Silero VAD ONNX model ──────────────────────────────────
+# Downloads the Silero VAD model (~2 MB) for neural speech detection.
+# Used by the streaming pipeline to replace energy-based VAD.
+SILERO_VAD_URL := https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx
+SILERO_VAD_PATH := models/silero_vad.onnx
+silero-model:
+	@mkdir -p models
+	@if [ ! -f "$(SILERO_VAD_PATH)" ]; then \
+		echo "==> Downloading Silero VAD model..."; \
+		curl -L --progress-bar "$(SILERO_VAD_URL)" -o "$(SILERO_VAD_PATH)"; \
+		echo "==> Silero VAD model saved to $(SILERO_VAD_PATH)"; \
+	else \
+		echo "    $(SILERO_VAD_PATH) already exists, skipping."; \
+	fi
+
 # ─── Stub build without whisper.cpp (for development / CI) ───────────
 # CGO is still enabled for malgo (audio) and robotgo (keyboard), but
 # whisper.cpp is NOT linked — the stub transcriber is used instead.
@@ -155,7 +176,7 @@ install: build
 	sudo install -m 0755 $(BUILD_DIR)/$(BINARY) $(INSTALL_DIR)/$(BINARY)
 	@echo "==> Creating udev rule for input device access..."
 	@echo 'KERNEL=="event*", SUBSYSTEM=="input", MODE="0660", GROUP="input", TAG+="uaccess"' \
-		| sudo tee /etc/udev/rules.d/99-gleann-sound-input.rules > /dev/null
+		| sudo tee /etc/udev/rules.d/99-gleann-plugin-sound-input.rules > /dev/null
 	@sudo udevadm control --reload-rules
 	@sudo udevadm trigger --subsystem-match=input
 	@echo "==> Adding $(USER) to 'input' group..."
@@ -165,13 +186,13 @@ install: build
 	@echo "✓ udev rule created — keyboard devices now accessible to logged-in users"
 	@echo "✓ User '$(USER)' added to 'input' group"
 	@echo ""
-	@echo "NOTE: Log out and back in (or run: sg input -c \"gleann-sound ...\") to activate."
+	@echo "NOTE: Log out and back in (or run: sg input -c \"gleann-plugin-sound ...\") to activate."
 
 # ─── Setup input group only (no install) ──────────────────────────────
 setup-input:
 	@echo "==> Setting up input device access..."
 	@echo 'KERNEL=="event*", SUBSYSTEM=="input", MODE="0660", GROUP="input", TAG+="uaccess"' \
-		| sudo tee /etc/udev/rules.d/99-gleann-sound-input.rules > /dev/null
+		| sudo tee /etc/udev/rules.d/99-gleann-plugin-sound-input.rules > /dev/null
 	@sudo udevadm control --reload-rules
 	@sudo udevadm trigger --subsystem-match=input
 	@sudo usermod -aG input $(USER)
@@ -189,3 +210,10 @@ run-transcribe: build
 
 run-dictate-onnx: build-onnx
 	$(BUILD_DIR)/$(BINARY)-onnx dictate --backend onnx --key "ctrl+alt+space" --model $(ONNX_MODEL_DIR)
+
+# ─── Release ──────────────────────────────────────────────────────────
+.PHONY: release
+release: build
+	@mkdir -p dist
+	tar czf dist/$(BINARY)-$(VERSION)-linux-amd64.tar.gz -C $(BUILD_DIR) $(BINARY)
+	@echo "📦 Release artifact in dist/"
