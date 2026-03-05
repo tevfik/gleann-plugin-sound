@@ -189,7 +189,7 @@ jobs:
               -DBUILD_SHARED_LIBS=OFF \
               ${{ matrix.cmake-extra }}
             cmake --build . --config Release --parallel 2
-            fi
+          else
             cmake .. \
               -DCMAKE_BUILD_TYPE=Release \
               -DCMAKE_INSTALL_PREFIX="$WHISPER_DIR/dist" \
