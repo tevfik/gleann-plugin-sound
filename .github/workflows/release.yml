@@ -158,7 +158,7 @@ jobs:
 
       - name: Install system dependencies (macOS)
         if: matrix.goos == 'darwin'
-        run: brew install cmake llvm libomp openblas
+        run: brew install cmake libomp openblas
 
       - name: Add MinGW to PATH (Windows)
         if: matrix.goos == 'windows'
@@ -189,12 +189,6 @@ jobs:
               -DBUILD_SHARED_LIBS=OFF \
               ${{ matrix.cmake-extra }}
             cmake --build . --config Release --parallel 2
-          else
-            if [ "${{ matrix.goos }}" = "darwin" ]; then
-              export CC=$(brew --prefix llvm)/bin/clang
-              export CXX=$(brew --prefix llvm)/bin/clang++
-              export LDFLAGS="-L$(brew --prefix llvm)/lib -L$(brew --prefix libomp)/lib"
-              export CPPFLAGS="-I$(brew --prefix llvm)/include -I$(brew --prefix libomp)/include"
             fi
             cmake .. \
               -DCMAKE_BUILD_TYPE=Release \
@@ -206,9 +200,20 @@ jobs:
               -DWHISPER_BUILD_TESTS=OFF \
               -DBUILD_SHARED_LIBS=OFF \
               ${{ matrix.cmake-extra }}
-          cmake --build . --config Release --parallel 2
+            cmake --build . --config Release --parallel 2
           fi
           cmake --install . --config Release
+
+          # Windows MinGW build might not prefix static libraries with 'lib'
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            for f in "$WHISPER_DIR/dist/lib"/*.a; do
+              basename=$(basename "$f")
+              if [[ ! "$basename" =~ ^lib ]]; then
+                mv "$f" "$WHISPER_DIR/dist/lib/lib$basename"
+              fi
+            done
+          fi
+
           ls -R "$WHISPER_DIR/dist/lib"
 
       - name: Determine version
