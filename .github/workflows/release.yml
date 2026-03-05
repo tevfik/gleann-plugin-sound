@@ -190,6 +190,10 @@ jobs:
               ${{ matrix.cmake-extra }}
             cmake --build . --config Release --parallel 2
           else
+            EXTRA_ARGS=""
+            if [ "${{ matrix.goos }}" = "darwin" ]; then
+               EXTRA_ARGS="-DOpenMP_ROOT=$(brew --prefix libomp)"
+            fi
             cmake .. \
               -DCMAKE_BUILD_TYPE=Release \
               -DCMAKE_INSTALL_PREFIX="$WHISPER_DIR/dist" \
@@ -199,7 +203,7 @@ jobs:
               -DWHISPER_BUILD_EXAMPLES=OFF \
               -DWHISPER_BUILD_TESTS=OFF \
               -DBUILD_SHARED_LIBS=OFF \
-              ${{ matrix.cmake-extra }}
+              ${{ matrix.cmake-extra }} ${EXTRA_ARGS}
             cmake --build . --config Release --parallel 2
           fi
           cmake --install . --config Release
