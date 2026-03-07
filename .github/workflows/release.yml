@@ -229,6 +229,10 @@ jobs:
         shell: bash
         run: |
           WHISPER_DIR="$HOME/whisper.cpp"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            WHISPER_DIR=$(cygpath -m "$WHISPER_DIR")
+          fi
+          
           BINARY="gleann-plugin-sound-${{ steps.version.outputs.version }}-${{ matrix.os-label }}${{ matrix.ext }}"
           LDFLAGS="-s -w -X main.version=${{ steps.version.outputs.version }}"
 
@@ -239,8 +243,8 @@ jobs:
             EXTRA_LDFLAGS="-lm -lc++ -lpthread -framework Accelerate $(brew --prefix libomp)/lib/libomp.a"
           elif [ "${{ matrix.goos }}" = "windows" ]; then
             # Static linking to avoid DLL dependencies.
-            # Added system libs required by newer whisper.cpp/ggml
-            EXTRA_LDFLAGS="-lstdc++ -lpthread -static-libgcc -static-libstdc++ -lsetupapi -ladvapi32 -lole32 -lshlwapi -Wl,-Bstatic -lgomp -Wl,-Bdynamic"
+            # Using -static ensures all MinGW libraries including gomp and stdc++ are statically linked.
+            EXTRA_LDFLAGS="-static -lstdc++ -lpthread -lsetupapi -ladvapi32 -lole32 -lshlwapi -lgomp"
           fi
 
           CGO_ENABLED=1 \
