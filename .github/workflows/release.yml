@@ -236,11 +236,11 @@ jobs:
           if [ "${{ matrix.goos }}" = "linux" ]; then
             EXTRA_LDFLAGS="-lm -lstdc++ -lpthread -lgomp"
           elif [ "${{ matrix.goos }}" = "darwin" ]; then
-            EXTRA_LDFLAGS="-lm -lc++ -lpthread -framework Accelerate"
+            EXTRA_LDFLAGS="-lm -lc++ -lpthread -framework Accelerate $(brew --prefix libomp)/lib/libomp.a"
           elif [ "${{ matrix.goos }}" = "windows" ]; then
             # Static linking to avoid DLL dependencies.
             # Added system libs required by newer whisper.cpp/ggml
-            EXTRA_LDFLAGS="-lstdc++ -lpthread -static-libgcc -static-libstdc++ -lsetupapi -ladvapi32 -lole32 -lshlwapi"
+            EXTRA_LDFLAGS="-lstdc++ -lpthread -static-libgcc -static-libstdc++ -lsetupapi -ladvapi32 -lole32 -lshlwapi -Wl,-Bstatic -lgomp -Wl,-Bdynamic"
           fi
 
           CGO_ENABLED=1 \
