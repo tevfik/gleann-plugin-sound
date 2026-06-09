@@ -233,7 +233,7 @@ func dictateLoopStreaming(
 
 		// ── Run streaming pipeline in background ───────────────
 		pipeCfg := pipeline.DefaultConfig()
-		if backend == "onnx" {
+		if backend == "onnx" || backend == "nemotron" {
 			pipeCfg = pipeline.ONNXConfig()
 		}
 		pipe := pipeline.NewStreamingPipeline(engine, vad, pipeCfg)

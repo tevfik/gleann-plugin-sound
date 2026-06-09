@@ -153,8 +153,8 @@ func TestInstallModelInit(t *testing.T) {
 	if m.uninstall {
 		t.Error("NewInstallModel should not be uninstall")
 	}
-	if len(m.options) != 4 {
-		t.Errorf("install options = %d, want 4", len(m.options))
+	if len(m.options) != 5 {
+		t.Errorf("install options = %d, want 5", len(m.options))
 	}
 }
 
@@ -163,8 +163,8 @@ func TestUninstallModelInit(t *testing.T) {
 	if !m.uninstall {
 		t.Error("NewUninstallModel should be uninstall")
 	}
-	if len(m.options) != 5 {
-		t.Errorf("uninstall options = %d, want 5", len(m.options))
+	if len(m.options) != 6 {
+		t.Errorf("uninstall options = %d, want 6", len(m.options))
 	}
 }
 

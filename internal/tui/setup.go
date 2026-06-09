@@ -206,6 +206,8 @@ func NewSetupModel(existingCfg *config.Config) SetupModel {
 	available := config.AvailableModels()
 	// Append ONNX Runtime models.
 	available = append(available, config.AvailableONNXModels()...)
+	// Append Nemotron ASR models.
+	available = append(available, config.AvailableNemotronModels()...)
 	// Append Silero VAD as a downloadable model option.
 	available = append(available, config.SileroVADModel())
 
@@ -239,6 +241,8 @@ func NewSetupModel(existingCfg *config.Config) SetupModel {
 		}
 		if existingCfg.Backend == "onnx" {
 			backendCursor = 1
+		} else if existingCfg.Backend == "nemotron" {
+			backendCursor = 2
 		}
 		switch existingCfg.ExecutionProvider {
 		case "cuda":
@@ -302,7 +306,7 @@ func NewSetupModel(existingCfg *config.Config) SetupModel {
 		existingDefaultModel: existingDefault,
 		grpcEnabled:          grpcEnabled,
 		grpcAddr:             grpcAddr,
-		backendOptions:       []string{"whisper", "onnx"},
+		backendOptions:       []string{"whisper", "onnx", "nemotron"},
 		backendCursor:        backendCursor,
 		providerOptions:      []string{"auto", "cuda", "cpu"},
 		providerCursor:       providerCursor,
@@ -363,8 +367,9 @@ func (m *SetupModel) advanceOnboarding() {
 			next = onboardingOrder[idx+2]
 		}
 	}
-	// Skip ONNX-only phases if backend isn't onnx.
-	isONNX := m.backendOptions[m.backendCursor] == "onnx"
+	// Skip ONNX-only phases if backend isn't onnx or nemotron.
+	backend := m.backendOptions[m.backendCursor]
+	isONNX := backend == "onnx" || backend == "nemotron"
 	for !isONNX && (next == phaseExecutionProvider || next == phasePipInstall) {
 		idx++
 		if idx >= len(onboardingOrder)-1 {
@@ -414,8 +419,9 @@ func (m *SetupModel) goBackOnboarding() bool {
 			prev = onboardingOrder[idx-1]
 		}
 	}
-	// Skip execution provider if backend isn't onnx.
-	isONNX := m.backendOptions[m.backendCursor] == "onnx"
+	// Skip execution provider if backend isn't onnx or nemotron.
+	backend := m.backendOptions[m.backendCursor]
+	isONNX := backend == "onnx" || backend == "nemotron"
 	if !isONNX && prev == phaseExecutionProvider {
 		for j := idx - 1; j >= 0; j-- {
 			if onboardingOrder[j] != phaseExecutionProvider && onboardingOrder[j] != phaseDownloading && onboardingOrder[j] != phasePipInstall {
@@ -476,8 +482,9 @@ func (m SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.phase = phaseModelSelect
 			return m, nil
 		}
-		// If ONNX backend is selected and runtime not installed, download it now.
-		if m.backendCursor < len(m.backendOptions) && m.backendOptions[m.backendCursor] == "onnx" && !config.IsONNXRuntimeDownloaded() {
+		// If ONNX or Nemotron backend is selected and runtime not installed, download it now.
+		backend := m.backendOptions[m.backendCursor]
+		if m.backendCursor < len(m.backendOptions) && (backend == "onnx" || backend == "nemotron") && !config.IsONNXRuntimeDownloaded() {
 			m.downloading = fmt.Sprintf("ONNX Runtime v%s", config.ONNXRuntimeVersion)
 			return m, func() tea.Msg {
 				_, err := config.DownloadONNXRuntime()
@@ -864,9 +871,10 @@ func (m SetupModel) updateBackend(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// list will be different so the old cursor position is invalid.
 		m.defaultCursor = 0
 
-		// In onboarding: onnx → exec provider, whisper → skip to default model.
-		// In overview: onnx → exec provider, whisper → back to overview.
-		if m.backendOptions[m.backendCursor] == "onnx" {
+		// In onboarding: onnx/nemotron → exec provider, whisper → skip to default model.
+		// In overview: onnx/nemotron → exec provider, whisper → back to overview.
+		backend := m.backendOptions[m.backendCursor]
+		if backend == "onnx" || backend == "nemotron" {
 			if m.returnPhase == phaseOverview {
 				// Stay in overview flow but visit exec provider first.
 				m.phase = phaseExecutionProvider
@@ -997,13 +1005,19 @@ func (m SetupModel) updateAudioSource(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // filteredInstalledModels returns only models matching the current backend.
-// ONNX model names start with "onnx-"; whisper models do not.
 func (m SetupModel) filteredInstalledModels() []config.ModelEntry {
-	isOnnx := m.backendOptions[m.backendCursor] == "onnx"
+	backend := m.backendOptions[m.backendCursor]
 	var filtered []config.ModelEntry
 	for _, e := range m.installedModels {
-		modelIsOnnx := strings.HasPrefix(e.Name, "onnx-")
-		if isOnnx == modelIsOnnx {
+		isCompatible := false
+		if backend == "whisper" {
+			isCompatible = !strings.HasPrefix(e.Name, "onnx-") && !strings.HasPrefix(e.Name, "nemotron-")
+		} else if backend == "onnx" {
+			isCompatible = strings.HasPrefix(e.Name, "onnx-")
+		} else if backend == "nemotron" {
+			isCompatible = strings.HasPrefix(e.Name, "nemotron-")
+		}
+		if isCompatible {
 			filtered = append(filtered, e)
 		}
 	}
@@ -1041,14 +1055,29 @@ func (m SetupModel) buildConfig() *config.Config {
 	if m.defaultCursor < len(m.installedModels) {
 		candidate := m.installedModels[m.defaultCursor]
 		// Validate that the selected model matches the backend.
-		isOnnx := m.backendOptions[m.backendCursor] == "onnx"
-		modelIsOnnx := strings.HasPrefix(candidate.Name, "onnx-")
-		if isOnnx == modelIsOnnx {
+		backend := m.backendOptions[m.backendCursor]
+		isCompatible := false
+		if backend == "whisper" {
+			isCompatible = !strings.HasPrefix(candidate.Name, "onnx-") && !strings.HasPrefix(candidate.Name, "nemotron-")
+		} else if backend == "onnx" {
+			isCompatible = strings.HasPrefix(candidate.Name, "onnx-")
+		} else if backend == "nemotron" {
+			isCompatible = strings.HasPrefix(candidate.Name, "nemotron-")
+		}
+		if isCompatible {
 			defaultModel = candidate.Path
 		} else {
 			// Mismatch — pick the first compatible model instead.
 			for _, e := range m.installedModels {
-				if strings.HasPrefix(e.Name, "onnx-") == isOnnx {
+				compatible := false
+				if backend == "whisper" {
+					compatible = !strings.HasPrefix(e.Name, "onnx-") && !strings.HasPrefix(e.Name, "nemotron-")
+				} else if backend == "onnx" {
+					compatible = strings.HasPrefix(e.Name, "onnx-")
+				} else if backend == "nemotron" {
+					compatible = strings.HasPrefix(e.Name, "nemotron-")
+				}
+				if compatible {
 					defaultModel = e.Path
 					break
 				}
@@ -1075,7 +1104,7 @@ func (m SetupModel) buildConfig() *config.Config {
 		OutputDir:     m.outputDir,
 		Completed:     true,
 	}
-	if backend == "onnx" {
+	if backend == "onnx" || backend == "nemotron" {
 		cfg.ExecutionProvider = m.providerOptions[m.providerCursor]
 	}
 	if m.grpcEnabled && m.grpcAddr != "" {
@@ -1218,8 +1247,9 @@ func (m SetupModel) viewOverview() string {
 			cursor = "▸ "
 		}
 
-		// Skip execution provider row when backend isn't onnx.
-		if item.phase == phaseExecutionProvider && m.backendOptions[m.backendCursor] != "onnx" {
+		// Skip execution provider row when backend isn't onnx or nemotron.
+		backend := m.backendOptions[m.backendCursor]
+		if item.phase == phaseExecutionProvider && backend != "onnx" && backend != "nemotron" {
 			continue
 		}
 
@@ -1720,7 +1750,7 @@ func (m SetupModel) viewSummary() string {
 		{"Dictation Hotkey", hotkey},
 		{"Backend", backend},
 	}
-	if backend == "onnx" {
+	if backend == "onnx" || backend == "nemotron" {
 		items = append(items, struct{ k, v string }{"Exec Provider", m.providerOptions[m.providerCursor]})
 	}
 	items = append(items,

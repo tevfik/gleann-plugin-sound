@@ -57,6 +57,7 @@ func NewInstallModel() InstallModel {
 			{label: "Copy binary to ~/.local/bin", desc: "Install gleann-plugin-sound to PATH", selected: true},
 			{label: "Shell completions", desc: "bash, zsh, fish autocompletion", selected: true},
 			{label: "Setup input group", desc: "udev rules for evdev keyboard access (requires sudo)", selected: true},
+			{label: "Install ONNX Runtime system-wide", desc: "Copy libonnxruntime to /usr/local/lib (requires sudo)", selected: true},
 			{label: "Start dictate daemon at login", desc: "Auto-start push-to-talk on login (systemd/launchd/schtasks)", selected: daemonPreSelected},
 		},
 	}
@@ -69,6 +70,7 @@ func NewUninstallModel() InstallModel {
 		options: []installOpt{
 			{label: "Remove binary from ~/.local/bin", desc: "Uninstall gleann-plugin-sound", selected: true},
 			{label: "Remove shell completions", desc: "Remove bash, zsh, fish completions", selected: true},
+			{label: "Remove system-wide ONNX Runtime", desc: "Remove libonnxruntime from /usr/local/lib (requires sudo)", selected: false},
 			{label: "Stop & remove dictate daemon", desc: "Remove auto-start service", selected: true},
 			{label: "Remove config", desc: "Delete ~/.gleann/sound.json", selected: false},
 			{label: "Remove models", desc: "Delete ~/.gleann/models/ (frees disk space)", selected: false},
@@ -174,8 +176,17 @@ func (m *InstallModel) runInstall() {
 		}
 	}
 
-	// Option 3: Dictate daemon.
+	// Option 3: ONNX Runtime system-wide.
 	if m.options[3].selected {
+		if err := installONNXRuntimeSystemWide(); err != nil {
+			m.log = append(m.log, fmt.Sprintf("✗ ONNX Runtime System-wide: %v", err))
+		} else {
+			m.log = append(m.log, "✓ ONNX Runtime installed system-wide in /usr/local/lib")
+		}
+	}
+
+	// Option 4: Dictate daemon.
+	if m.options[4].selected {
 		if err := installDaemon(); err != nil {
 			m.log = append(m.log, fmt.Sprintf("✗ Daemon: %v", err))
 		} else {
@@ -191,7 +202,8 @@ func (m *InstallModel) runInstall() {
 	cfg.InstallPath = filepath.Join(expandPath("~/.local/bin"), "gleann-plugin-sound")
 	cfg.CompletionsInstalled = m.options[1].selected
 	cfg.InputGroupSetup = m.options[2].selected
-	cfg.DaemonEnabled = m.options[3].selected
+	cfg.ONNXRuntimeSystemWide = m.options[3].selected
+	cfg.DaemonEnabled = m.options[4].selected
 	_ = config.Save(cfg)
 }
 
@@ -206,7 +218,7 @@ func (m *InstallModel) runUninstall() {
 		}
 	}
 
-	// Option 1: Shell completions.
+	// Option 1: Remove shell completions.
 	if m.options[1].selected {
 		removed := removeCompletions()
 		for _, r := range removed {
@@ -214,8 +226,17 @@ func (m *InstallModel) runUninstall() {
 		}
 	}
 
-	// Option 2: Stop & remove daemon.
+	// Option 2: Remove system-wide ONNX Runtime.
 	if m.options[2].selected {
+		if err := removeONNXRuntimeSystemWide(); err != nil {
+			m.log = append(m.log, fmt.Sprintf("✗ Remove system-wide ONNX Runtime: %v", err))
+		} else {
+			m.log = append(m.log, "✓ Removed system-wide ONNX Runtime library")
+		}
+	}
+
+	// Option 3: Stop & remove daemon.
+	if m.options[3].selected {
 		if err := removeDaemon(); err != nil {
 			m.log = append(m.log, fmt.Sprintf("✗ Remove daemon: %v", err))
 		} else {
@@ -223,8 +244,8 @@ func (m *InstallModel) runUninstall() {
 		}
 	}
 
-	// Option 3: Remove config.
-	if m.options[3].selected {
+	// Option 4: Remove config.
+	if m.options[4].selected {
 		path := config.ConfigPath()
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			m.log = append(m.log, fmt.Sprintf("✗ Remove config: %v", err))
@@ -233,8 +254,8 @@ func (m *InstallModel) runUninstall() {
 		}
 	}
 
-	// Option 4: Remove models.
-	if m.options[4].selected {
+	// Option 5: Remove models.
+	if m.options[5].selected {
 		dir := config.ModelsDir()
 		if err := os.RemoveAll(dir); err != nil {
 			m.log = append(m.log, fmt.Sprintf("✗ Remove models: %v", err))
@@ -836,4 +857,89 @@ func (m InstallModel) viewDone() string {
 	b.WriteString("\n")
 	b.WriteString(StatusBarStyle.Render("  Press enter or q to return"))
 	return b.String()
+}
+
+// ── System-wide ONNX Runtime Installation Helpers ──────────────
+
+func installONNXRuntimeSystemWide() error {
+	libPath := config.ONNXRuntimePath()
+	if libPath == "" {
+		return fmt.Errorf("unsupported platform for ONNX Runtime download")
+	}
+
+	if _, err := os.Stat(libPath); os.IsNotExist(err) {
+		var dlErr error
+		libPath, dlErr = config.DownloadONNXRuntime()
+		if dlErr != nil {
+			return fmt.Errorf("failed to download ONNX Runtime: %w", dlErr)
+		}
+	}
+
+	switch runtime.GOOS {
+	case "linux":
+		cmdMkdir := exec.Command("sudo", "mkdir", "-p", "/usr/local/lib")
+		if err := cmdMkdir.Run(); err != nil {
+			return fmt.Errorf("failed to create /usr/local/lib: %w", err)
+		}
+		dstPath := "/usr/local/lib/libonnxruntime.so"
+		cmdCopy := exec.Command("sudo", "cp", libPath, dstPath)
+		if err := cmdCopy.Run(); err != nil {
+			return fmt.Errorf("failed to copy library to /usr/local/lib: %w", err)
+		}
+		cmdLd := exec.Command("sudo", "ldconfig")
+		if err := cmdLd.Run(); err != nil {
+			return fmt.Errorf("failed to run ldconfig: %w", err)
+		}
+		return nil
+
+	case "darwin":
+		cmdMkdir := exec.Command("sudo", "mkdir", "-p", "/usr/local/lib")
+		if err := cmdMkdir.Run(); err != nil {
+			return fmt.Errorf("failed to create /usr/local/lib: %w", err)
+		}
+		dstPath := "/usr/local/lib/libonnxruntime.dylib"
+		cmdCopy := exec.Command("sudo", "cp", libPath, dstPath)
+		if err := cmdCopy.Run(); err != nil {
+			return fmt.Errorf("failed to copy library to /usr/local/lib: %w", err)
+		}
+		return nil
+
+	case "windows":
+		targetDir := expandPath("~/.local/bin")
+		if err := os.MkdirAll(targetDir, 0o755); err != nil {
+			return fmt.Errorf("create target dir: %w", err)
+		}
+		dstPath := filepath.Join(targetDir, "onnxruntime.dll")
+		src, err := os.Open(libPath)
+		if err != nil {
+			return fmt.Errorf("open source dll: %w", err)
+		}
+		defer src.Close()
+		out, err := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
+		if err != nil {
+			return fmt.Errorf("create destination dll: %w", err)
+		}
+		defer out.Close()
+		if _, err := io.Copy(out, src); err != nil {
+			return fmt.Errorf("copy dll: %w", err)
+		}
+		return nil
+
+	default:
+		return fmt.Errorf("unsupported platform for system-wide library copy")
+	}
+}
+
+func removeONNXRuntimeSystemWide() error {
+	switch runtime.GOOS {
+	case "linux":
+		_ = exec.Command("sudo", "rm", "-f", "/usr/local/lib/libonnxruntime.so").Run()
+		_ = exec.Command("sudo", "ldconfig").Run()
+	case "darwin":
+		_ = exec.Command("sudo", "rm", "-f", "/usr/local/lib/libonnxruntime.dylib").Run()
+	case "windows":
+		path := filepath.Join(expandPath("~/.local/bin"), "onnxruntime.dll")
+		_ = os.Remove(path)
+	}
+	return nil
 }

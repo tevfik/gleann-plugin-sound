@@ -34,6 +34,7 @@ func newTestCmd() *cobra.Command {
 Uses the config from ~/.gleann/sound.json or CLI flags.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			modelPath, _ := cmd.Flags().GetString("model")
+			backend, _ := cmd.Flags().GetString("backend")
 			hotkeyStr, _ := cmd.Flags().GetString("key")
 			lang, _ := cmd.Flags().GetString("language")
 
@@ -41,6 +42,12 @@ Uses the config from ~/.gleann/sound.json or CLI flags.`,
 			cfg := config.Load()
 			if modelPath == "" && cfg != nil && cfg.DefaultModel != "" {
 				modelPath = cfg.DefaultModel
+			}
+			if backend == "" && cfg != nil && cfg.Backend != "" {
+				backend = cfg.Backend
+			}
+			if backend == "" {
+				backend = "whisper"
 			}
 			if hotkeyStr == "" && cfg != nil && cfg.Hotkey != "" {
 				hotkeyStr = cfg.Hotkey
@@ -65,9 +72,9 @@ Uses the config from ~/.gleann/sound.json or CLI flags.`,
 			hotkeyOK := testHotkey(hotkeyStr)
 			fmt.Println()
 
-			// ── Step 3: Whisper ────────────────────────────────
-			printStep(3, "Whisper Transcription")
-			whisperOK := testWhisper(modelPath, lang, pcm)
+			// ── Step 3: Transcription Backend ──────────────────
+			printStep(3, "Transcription Backend")
+			whisperOK := testTranscriptionBackend(backend, modelPath, lang, pcm)
 			fmt.Println()
 
 			// ── Step 4: Keyboard ───────────────────────────────
@@ -79,7 +86,7 @@ Uses the config from ~/.gleann/sound.json or CLI flags.`,
 			printHeader("Results")
 			printResult("Microphone", micOK)
 			printResult("Hotkey", hotkeyOK)
-			printResult("Whisper", whisperOK)
+			printResult("Transcription ("+backend+")", whisperOK)
 			printResult("Keyboard", kbOK)
 			fmt.Println()
 
@@ -214,7 +221,7 @@ func testHotkey(hotkeyStr string) bool {
 	return true
 }
 
-func testWhisper(modelPath, lang string, pcm []int16) bool {
+func testTranscriptionBackend(backend, modelPath, lang string, pcm []int16) bool {
 	if modelPath == "" {
 		fmt.Println("  ✗ No model path specified (use --model or run setup)")
 		return false
@@ -225,8 +232,7 @@ func testWhisper(modelPath, lang string, pcm []int16) bool {
 		return false
 	}
 
-	fmt.Printf("  Loading model: %s\n", modelPath)
-	backend := "whisper" // test always uses whisper for now
+	fmt.Printf("  Loading model: %s (backend: %s)\n", modelPath, backend)
 	engine, err := core.NewTranscriber(backend, modelPath)
 	if err != nil {
 		fmt.Printf("  ✗ Failed to load: %v\n", err)

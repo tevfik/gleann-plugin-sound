@@ -16,7 +16,7 @@ import (
 // transcribe the JFK speech sample correctly.  This test requires:
 //   - Build tag: whisper
 //   - Model:     models/ggml-base.en.bin (or set WHISPER_MODEL env)
-//   - Test data: testdata/jfk.wav
+//   - Test data: test/testdata/jfk.wav
 //
 // Run:
 //
@@ -27,7 +27,7 @@ func TestEngine_TranscribeFile_JFK(t *testing.T) {
 		modelPath = "../../models/ggml-base.en.bin"
 	}
 
-	wavPath := "../../testdata/jfk.wav"
+	wavPath := "../../test/testdata/jfk.wav"
 
 	// Skip if model or test data is missing.
 	if _, err := os.Stat(modelPath); os.IsNotExist(err) {

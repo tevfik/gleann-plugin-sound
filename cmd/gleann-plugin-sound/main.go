@@ -17,6 +17,7 @@ import (
 	"github.com/tevfik/gleann-plugin-sound/internal/config"
 
 	// Register backends — import for side-effect init().
+	_ "github.com/tevfik/gleann-plugin-sound/internal/nemotron"
 	_ "github.com/tevfik/gleann-plugin-sound/internal/onnx"
 	_ "github.com/tevfik/gleann-plugin-sound/internal/whisper"
 )
@@ -62,7 +63,7 @@ Run 'gleann-plugin-sound tui' for interactive setup and configuration.`,
 	root.PersistentFlags().String("model", defaultModel,
 		"Path to the Whisper GGML model file")
 	root.PersistentFlags().String("backend", defaultBackend,
-		"Transcription backend: whisper (default) or onnx")
+		"Transcription backend: whisper (default), onnx or nemotron")
 	root.PersistentFlags().String("provider", defaultProvider,
 		"ONNX execution provider: auto (default), cuda, cpu")
 	root.PersistentFlags().Bool("verbose", false,
@@ -84,6 +85,7 @@ Run 'gleann-plugin-sound tui' for interactive setup and configuration.`,
 		newDictateCmd(),
 		newTUICmd(),
 		newTestCmd(),
+		newBenchmarkCmd(),
 		newDevicesCmd(),
 		newPluginServeCmd(),
 		newInstallPluginCmd(),

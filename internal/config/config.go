@@ -42,10 +42,11 @@ type Config struct {
 	GRPCAddr string `json:"grpc_addr,omitempty"` // e.g. "localhost:50051"
 
 	// Install state.
-	InstallPath          string `json:"install_path,omitempty"`
-	CompletionsInstalled bool   `json:"completions_installed,omitempty"`
-	InputGroupSetup      bool   `json:"input_group_setup,omitempty"`
-	DaemonEnabled        bool   `json:"daemon_enabled,omitempty"`
+	InstallPath           string `json:"install_path,omitempty"`
+	CompletionsInstalled  bool   `json:"completions_installed,omitempty"`
+	InputGroupSetup       bool   `json:"input_group_setup,omitempty"`
+	ONNXRuntimeSystemWide bool   `json:"onnx_runtime_system_wide,omitempty"`
+	DaemonEnabled         bool   `json:"daemon_enabled,omitempty"`
 
 	// Flag indicating setup was completed.
 	Completed bool `json:"completed"`
@@ -161,6 +162,31 @@ func AvailableONNXModels() []WhisperModel {
 		makeBundle("medium", "onnx-medium", "[ONNX] Medium — ~3 GB", "3 GB", true),
 	}
 }
+
+// AvailableNemotronModels returns the Nemotron ASR models available for download.
+func AvailableNemotronModels() []WhisperModel {
+	repo := "https://huggingface.co/onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4/resolve/main"
+	return []WhisperModel{
+		{
+			Name:         "nemotron-3.5-asr-int4",
+			DisplayName:  "[Nemotron ASR] Causal Streaming ASR tr/en (INT4) — ~450 MB",
+			FileName:     "nemotron-3.5-asr-int4-onnx",
+			Size:         "450 MB",
+			Multilingual: true,
+			BundleFiles: []BundleFile{
+				{Name: "encoder.onnx", URL: repo + "/encoder.onnx"},
+				{Name: "encoder.onnx.data", URL: repo + "/encoder.onnx.data"},
+				{Name: "decoder.onnx", URL: repo + "/decoder.onnx"},
+				{Name: "decoder.onnx.data", URL: repo + "/decoder.onnx.data"},
+				{Name: "joint.onnx", URL: repo + "/joint.onnx"},
+				{Name: "joint.onnx.data", URL: repo + "/joint.onnx.data"},
+				{Name: "vocab.txt", URL: repo + "/vocab.txt"},
+				{Name: "tokenizer.json", URL: repo + "/tokenizer.json"},
+			},
+		},
+	}
+}
+
 
 // DefaultDir returns the gleann config directory: ~/.gleann
 func DefaultDir() string {

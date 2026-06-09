@@ -185,7 +185,7 @@ Press Ctrl+C to stop.`,
 			// ── Run the streaming pipeline ─────────────────────────
 			// ONNX CPU inference is much slower — use larger windows.
 			pipeCfg := pipeline.DefaultConfig()
-			if backend == "onnx" {
+			if backend == "onnx" || backend == "nemotron" {
 				pipeCfg = pipeline.ONNXConfig()
 			}
 			pipe := pipeline.NewStreamingPipeline(streamEngine, vad, pipeCfg)

@@ -167,7 +167,7 @@ func (m HomeModel) View() string {
 			backendStr = "whisper"
 		}
 		statusLine += fmt.Sprintf(" │ backend: %s", backendStr)
-		if backendStr == "onnx" && m.cfg.ExecutionProvider != "" {
+		if (backendStr == "onnx" || backendStr == "nemotron") && m.cfg.ExecutionProvider != "" {
 			statusLine += fmt.Sprintf(" (%s)", m.cfg.ExecutionProvider)
 		}
 		if m.cfg.GRPCAddr != "" {
