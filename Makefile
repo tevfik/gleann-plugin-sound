@@ -150,7 +150,10 @@ build-stub:
 
 # ─── Tests ────────────────────────────────────────────────────────────
 test:
-	$(GO) test ./... -v -count=1 -timeout 60s
+	CGO_ENABLED=1 \
+	CGO_CFLAGS="$(CGO_CFLAGS)" \
+	CGO_LDFLAGS="$(CGO_LDFLAGS)" \
+	$(GO) test -tags "whisper,onnx" ./... -v -count=1 -timeout 60s
 
 # ─── Test with coverage report ────────────────────────────────────────
 test-cover:

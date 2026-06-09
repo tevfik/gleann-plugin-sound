@@ -384,14 +384,26 @@ func (e *Engine) TranscribeStreamSegments(ctx context.Context, pcmData []int16) 
 	// Compute log-mel spectrogram.
 	melSpec := e.computeMelSpectrogram(samples)
 
-	// Pad or truncate to [nMels, 3000] (30s chunk).
+	// Pad or truncate to [nMels, 3000] (30s chunk) row-by-row to preserve layout.
 	const melFrames = 3000
 	padded := make([]float32, nMels*melFrames)
-	copyLen := len(melSpec)
-	if copyLen > nMels*melFrames {
-		copyLen = nMels * melFrames
+	numSamples := len(samples)
+	if numSamples < nFFT {
+		numSamples = nFFT
 	}
-	copy(padded, melSpec[:copyLen])
+	numFrames := (numSamples - nFFT) / hopLength + 1
+	if numFrames < 1 {
+		numFrames = 1
+	}
+	copyFrames := numFrames
+	if copyFrames > melFrames {
+		copyFrames = melFrames
+	}
+	for m := 0; m < nMels; m++ {
+		srcOffset := m * numFrames
+		dstOffset := m * melFrames
+		copy(padded[dstOffset:dstOffset+copyFrames], melSpec[srcOffset:srcOffset+copyFrames])
+	}
 
 	// Run encoder.
 	encoderInput, err := ort.NewTensor(ort.NewShape(1, int64(nMels), int64(melFrames)), padded)
@@ -507,14 +519,26 @@ func (e *Engine) TranscribeWindow(ctx context.Context, pcmData []int16, promptTe
 	// Compute log-mel spectrogram.
 	melSpec := e.computeMelSpectrogram(samples)
 
-	// Pad or truncate to [nMels, 3000].
+	// Pad or truncate to [nMels, 3000] (30s chunk) row-by-row to preserve layout.
 	const melFrames = 3000
 	padded := make([]float32, nMels*melFrames)
-	copyLen := len(melSpec)
-	if copyLen > nMels*melFrames {
-		copyLen = nMels * melFrames
+	numSamples := len(samples)
+	if numSamples < nFFT {
+		numSamples = nFFT
 	}
-	copy(padded, melSpec[:copyLen])
+	numFrames := (numSamples - nFFT) / hopLength + 1
+	if numFrames < 1 {
+		numFrames = 1
+	}
+	copyFrames := numFrames
+	if copyFrames > melFrames {
+		copyFrames = melFrames
+	}
+	for m := 0; m < nMels; m++ {
+		srcOffset := m * numFrames
+		dstOffset := m * melFrames
+		copy(padded[dstOffset:dstOffset+copyFrames], melSpec[srcOffset:srcOffset+copyFrames])
+	}
 
 	// Run encoder.
 	encoderInput, err := ort.NewTensor(ort.NewShape(1, int64(nMels), int64(melFrames)), padded)
@@ -816,6 +840,7 @@ func (e *Engine) computeMelSpectrogram(samples []float32) []float32 {
 
 	// Apply mel filterbank.
 	mel := make([]float32, nMels*numFrames)
+	var maxVal float32 = -1e20
 	for m := 0; m < nMels; m++ {
 		for frame := 0; frame < numFrames; frame++ {
 			var sum float32
@@ -826,8 +851,22 @@ func (e *Engine) computeMelSpectrogram(samples []float32) []float32 {
 			if sum < 1e-10 {
 				sum = 1e-10
 			}
-			mel[m*numFrames+frame] = float32(math.Log10(float64(sum)))
+			val := float32(math.Log10(float64(sum)))
+			mel[m*numFrames+frame] = val
+			if val > maxVal {
+				maxVal = val
+			}
 		}
+	}
+
+	// Dynamic range clipping and rescaling to [-1, 1] range: (log_mel + 4.0) / 4.0
+	clipFloor := maxVal - 8.0
+	for i := range mel {
+		val := mel[i]
+		if val < clipFloor {
+			val = clipFloor
+		}
+		mel[i] = (val + 4.0) / 4.0
 	}
 
 	return mel
