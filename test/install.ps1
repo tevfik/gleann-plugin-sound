@@ -35,8 +35,7 @@ if (-not $LatestTag) {
 Write-Host "Found release: $LatestTag" -ForegroundColor Green
 
 # Download URL
-$CleanTag = $LatestTag.TrimStart('v')
-$ZipFile = "gleann-plugin-sound_${CleanTag}_windows_${Arch}.zip"
+$ZipFile = "gleann-plugin-sound-${LatestTag}-windows-${Arch}.zip"
 $Url = "https://github.com/$Repo/releases/download/$LatestTag/$ZipFile"
 
 Write-Host "Downloading binary from: $Url" -ForegroundColor Yellow

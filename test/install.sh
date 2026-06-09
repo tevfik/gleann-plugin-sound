@@ -49,7 +49,7 @@ fi
 echo -e "${GREEN}Found release: $LATEST_TAG${NC}"
 
 # Download URL
-TARBALL="gleann-plugin-sound_${LATEST_TAG#v}_${OS}_${ARCH}.tar.gz"
+TARBALL="gleann-plugin-sound-${LATEST_TAG}-${OS}-${ARCH}.tar.gz"
 URL="https://github.com/$REPO/releases/download/$LATEST_TAG/$TARBALL"
 
 echo -e "${YELLOW}Downloading binary from: $URL${NC}"
