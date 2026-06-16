@@ -160,6 +160,43 @@ func TestEngine_ScanLanguageIDs(t *testing.T) {
 	}
 }
 
+func TestEngine_PostProcessTurkish(t *testing.T) {
+	engine := &Engine{lang: "tr"}
+
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{
+			input:    "Marava sey sklavye eklentisi düzgün çalışır.",
+			expected: "Merhaba sesli klavye eklentisi düzgün çalışır.",
+		},
+		{
+			input:    "Her şeyin yolunda olup olmadığından sanlacan.",
+			expected: "Her şeyin yolunda olup olmadığından anlayacaksın.",
+		},
+		{
+			input:    "Koaliti veyalı alır.",
+			expected: "Kaliteli veya alır.",
+		},
+		{
+			input:    "Şehir bin der.",
+			expected: "Şiir biter.",
+		},
+		{
+			input:    "merdılan basarhayla kal isiyor",
+			expected: "merhaba başarıyla çalışıyor",
+		},
+	}
+
+	for _, tc := range tests {
+		got := engine.postProcessTurkish(tc.input)
+		if got != tc.expected {
+			t.Errorf("postProcessTurkish(%q) = %q; want %q", tc.input, got, tc.expected)
+		}
+	}
+}
+
 
 
 

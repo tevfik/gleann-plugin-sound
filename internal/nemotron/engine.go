@@ -1105,7 +1105,7 @@ func (e *Engine) decodeTokens(tokens []int64) string {
 	}
 	text := strings.TrimSpace(sb.String())
 	if strings.ToLower(e.lang) == "tr" || e.lang == "18" {
-		text = postProcessTurkish(text)
+		text = e.postProcessTurkish(text)
 	}
 	return text
 }
@@ -1181,13 +1181,19 @@ func (e *Engine) computeMelSpectrogram(samples []float32) []float32 {
 
 // postProcessTurkish cleans up common phonetic spelling mistakes
 // typical of multilingual ASR models in Turkish.
-func postProcessTurkish(text string) string {
+func (e *Engine) postProcessTurkish(text string) string {
 	// Simple replacements (keys must be lowercase)
 	replacements := map[string]string{
 		"merdılan":   "merhaba",
+		"marava":     "merhaba",
+		"meraba":     "merhaba",
+		"sklavye":    "klavye",
+		"sanlacan":   "anlayacaksın",
+		"koaliti":    "kaliteli",
+		"veyalı":     "veya",
+		"sey":        "sesli",
 		"basarhayla": "başarıyla",
 		"kalisiyor":  "çalışıyor",
-		"kal isiyor": "çalışıyor",
 		"gılan":      "gleann",
 		"basariha":   "başarıyla",
 		"kalisior":   "çalışıyor",
@@ -1221,10 +1227,25 @@ func postProcessTurkish(text string) string {
 	phrases := []struct{ src, dst string }{
 		{"kal isiyor", "çalışıyor"},
 		{"kal isiyor.", "çalışıyor."},
+		{"şehir bin der", "şiir biter"},
+		{"şehir bin der.", "şiir biter."},
+		{"eklent isi", "eklentisi"},
+		{"klavy e", "klavye"},
+		{"bas arhayla", "başarıyla"},
+		{"kal isi yor", "çalışıyor"},
 	}
 	for _, p := range phrases {
 		re := regexp.MustCompile("(?i)" + regexp.QuoteMeta(p.src))
-		result = re.ReplaceAllString(result, p.dst)
+		result = re.ReplaceAllStringFunc(result, func(match string) string {
+			dst := p.dst
+			if len(match) > 0 {
+				r := []rune(match)
+				if unicode.IsUpper(r[0]) {
+					dst = capitalize(dst)
+				}
+			}
+			return dst
+		})
 	}
 
 	return result
