@@ -378,31 +378,42 @@ func (p *StreamingPipeline) flush(ctx context.Context, onResult OnResult) {
 	windowEnd := windowStart + time.Duration(float64(len(window))/SampleRate*1000)*time.Millisecond
 
 	log.Printf("[pipeline] flush transcribing window #%d (%d samples)...", seq, len(window))
-	result, _, err := p.transcriber.TranscribeWindow(ctx, window, promptText)
-	if err != nil {
-		log.Printf("[pipeline] flush window #%d: transcription error: %v", seq, err)
-		return
+
+	var resultText string
+
+	// Prefer batch transcription (TranscribeStream) over streaming window mode.
+	// Batch mode starts with a clean state and processes the full audio in one
+	// shot — giving significantly better accuracy for push-to-talk utterances.
+	if batchT, ok := p.transcriber.(core.Transcriber); ok {
+		text, err := batchT.TranscribeStream(ctx, window)
+		if err != nil {
+			log.Printf("[pipeline] flush batch transcribe error: %v", err)
+			return
+		}
+		resultText = text
+	} else {
+		res, _, err := p.transcriber.TranscribeWindow(ctx, window, promptText)
+		if err != nil {
+			log.Printf("[pipeline] flush window #%d: transcription error: %v", seq, err)
+			return
+		}
+		resultText = res.Text
 	}
 
-	if result.Text == "" {
+	if resultText == "" {
 		log.Printf("[pipeline] flush window #%d: transcribed empty text", seq)
 		return
 	}
 
-	var deduped string
-	if len(result.Segments) > 0 && seq > 0 {
-		overlapSec := p.cfg.WindowSizeSec - p.cfg.StepSizeSec
-		kept := DeduplicateByTimestamp(result.Segments, overlapSec)
-		deduped = JoinSegments(kept)
-		result.Segments = kept
-	} else {
-		deduped = DeduplicateOverlap(prevText, result.Text)
+	deduped := DeduplicateOverlap(prevText, resultText)
+
+	result := core.StreamResult{
+		Text:      deduped,
+		Start:     windowStart,
+		End:       windowEnd,
+		WindowSeq: seq,
+		IsFinal:   true,
 	}
-	result.Text = deduped
-	result.Start = windowStart
-	result.End = windowEnd
-	result.WindowSeq = seq
-	result.IsFinal = true
 
 	if deduped != "" {
 		onResult(result)

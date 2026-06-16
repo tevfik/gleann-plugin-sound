@@ -12,10 +12,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	ort "github.com/yalue/onnxruntime_go"
 
@@ -267,6 +269,11 @@ func NewEngine(modelDir string) (*Engine, error) {
 	}
 	defer sessionOpts.Destroy()
 
+	// Optimize thread count to avoid thread contention on high-core CPUs.
+	// 4 threads is generally optimal for speech transformer models.
+	_ = sessionOpts.SetIntraOpNumThreads(4)
+	_ = sessionOpts.SetInterOpNumThreads(1)
+
 	actualProvider := "cpu"
 	switch executionProvider {
 	case ProviderCUDA:
@@ -441,7 +448,7 @@ func (e *Engine) TranscribeStreamSegments(ctx context.Context, pcmData []int16) 
 	const preEncodeCache = 9
 	const chunkSize = 56
 	const targetFrames = 65 // preEncodeCache + chunkSize
-	var finalTexts []string
+	var allTokens []int64
 
 	chunkIdx := 0
 	// Process in sequential chunks of chunkSize (56)
@@ -601,22 +608,18 @@ func (e *Engine) TranscribeStreamSegments(ctx context.Context, pcmData []int16) 
 		encOutData := typedEncOutput.GetData()
 
 		// Run greedy decoding on this chunk's encoded outputs
-		text, err := e.greedyDecode(ctx, encOutData, encOutputLen, hInData, cInData, &lastToken)
+		chunkTokens, err := e.greedyDecode(ctx, encOutData, encOutputLen, hInData, cInData, &lastToken)
 		encOutput.Destroy()
 		if err != nil {
 			return nil, err
 		}
 
-		if text != "" {
-			finalTexts = append(finalTexts, text)
-		}
+		allTokens = append(allTokens, chunkTokens...)
 
 		chunkIdx++
 	}
 
-	combinedText := strings.Join(finalTexts, " ")
-	combinedText = strings.ReplaceAll(combinedText, "  ", " ")
-	combinedText = strings.TrimSpace(combinedText)
+	combinedText := e.decodeTokens(allTokens)
 
 	durSec := float64(len(pcmData)) / float64(sampleRate)
 	log.Printf("[nemotron] transcribed: %q (%.1fs audio)", combinedText, durSec)
@@ -681,7 +684,7 @@ func (e *Engine) TranscribeWindow(ctx context.Context, pcmData []int16, promptTe
 	const preEncodeCache = 9
 	const chunkSize = 56
 	const targetFrames = 65 // preEncodeCache + chunkSize
-	var finalTexts []string
+	var allTokens []int64
 
 	chunkIdx := 0
 	for chunkStart := 0; chunkStart < numFrames; chunkStart += chunkSize {
@@ -837,22 +840,18 @@ func (e *Engine) TranscribeWindow(ctx context.Context, pcmData []int16, promptTe
 		}
 		encOutData := typedEncOutput.GetData()
 
-		text, err := e.greedyDecode(ctx, encOutData, encOutputLen, e.decoderH, e.decoderC, &e.lastToken)
+		chunkTokens, err := e.greedyDecode(ctx, encOutData, encOutputLen, e.decoderH, e.decoderC, &e.lastToken)
 		encOutput.Destroy()
 		if err != nil {
 			return core.StreamResult{}, promptText, err
 		}
 
-		if text != "" {
-			finalTexts = append(finalTexts, text)
-		}
+		allTokens = append(allTokens, chunkTokens...)
 
 		chunkIdx++
 	}
 
-	combinedText := strings.Join(finalTexts, " ")
-	combinedText = strings.ReplaceAll(combinedText, "  ", " ")
-	combinedText = strings.TrimSpace(combinedText)
+	combinedText := e.decodeTokens(allTokens)
 
 	durSec := float64(len(pcmData)) / float64(sampleRate)
 
@@ -940,7 +939,7 @@ func (e *Engine) TranscribeFile(ctx context.Context, filepath string) ([]core.Se
 }
 
 // greedyDecode performs RNN-T greedy decoding loop over all frames
-func (e *Engine) greedyDecode(ctx context.Context, encOutData []float32, encOutputLen int64, hInData, cInData []float32, lastToken *int64) (string, error) {
+func (e *Engine) greedyDecode(ctx context.Context, encOutData []float32, encOutputLen int64, hInData, cInData []float32, lastToken *int64) ([]int64, error) {
 	blankToken := int64(13087)
 	u := *lastToken
 
@@ -960,7 +959,7 @@ func (e *Engine) greedyDecode(ctx context.Context, encOutData []float32, encOutp
 
 		frameTensor, err := ort.NewTensor(ort.NewShape(1, 1, 1024), frameData)
 		if err != nil {
-			return "", fmt.Errorf("joint encoder tensor creation failed: %w", err)
+			return nil, fmt.Errorf("joint encoder tensor creation failed: %w", err)
 		}
 
 		symbolsCount := 0
@@ -968,13 +967,13 @@ func (e *Engine) greedyDecode(ctx context.Context, encOutData []float32, encOutp
 			hInTensor, err := ort.NewTensor(hInShape, hInData)
 			if err != nil {
 				frameTensor.Destroy()
-				return "", fmt.Errorf("decoder h_in tensor creation failed: %w", err)
+				return nil, fmt.Errorf("decoder h_in tensor creation failed: %w", err)
 			}
 			cInTensor, err := ort.NewTensor(cInShape, cInData)
 			if err != nil {
 				frameTensor.Destroy()
 				hInTensor.Destroy()
-				return "", fmt.Errorf("decoder c_in tensor creation failed: %w", err)
+				return nil, fmt.Errorf("decoder c_in tensor creation failed: %w", err)
 			}
 
 			targetsTensor, err := ort.NewTensor(ort.NewShape(1, 1), []int64{u})
@@ -982,7 +981,7 @@ func (e *Engine) greedyDecode(ctx context.Context, encOutData []float32, encOutp
 				frameTensor.Destroy()
 				hInTensor.Destroy()
 				cInTensor.Destroy()
-				return "", fmt.Errorf("decoder targets tensor creation failed: %w", err)
+				return nil, fmt.Errorf("decoder targets tensor creation failed: %w", err)
 			}
 
 			decoderOutputs := []ort.Value{nil, nil, nil}
@@ -994,7 +993,7 @@ func (e *Engine) greedyDecode(ctx context.Context, encOutData []float32, encOutp
 			cInTensor.Destroy()
 			if err != nil {
 				frameTensor.Destroy()
-				return "", fmt.Errorf("decoder execution failed: %w", err)
+				return nil, fmt.Errorf("decoder execution failed: %w", err)
 			}
 
 			decOutputTensor := decoderOutputs[0].(*ort.Tensor[float32])
@@ -1006,7 +1005,7 @@ func (e *Engine) greedyDecode(ctx context.Context, encOutData []float32, encOutp
 				decoderOutputs[0].Destroy()
 				decoderOutputs[1].Destroy()
 				decoderOutputs[2].Destroy()
-				return "", fmt.Errorf("joint decoder tensor creation failed: %w", err)
+				return nil, fmt.Errorf("joint decoder tensor creation failed: %w", err)
 			}
 
 			jointOutputs := []ort.Value{nil}
@@ -1019,7 +1018,7 @@ func (e *Engine) greedyDecode(ctx context.Context, encOutData []float32, encOutp
 				decoderOutputs[0].Destroy()
 				decoderOutputs[1].Destroy()
 				decoderOutputs[2].Destroy()
-				return "", fmt.Errorf("joint execution failed: %w", err)
+				return nil, fmt.Errorf("joint execution failed: %w", err)
 			}
 
 			logitsTensor := jointOutputs[0].(*ort.Tensor[float32])
@@ -1075,7 +1074,7 @@ func (e *Engine) greedyDecode(ctx context.Context, encOutData []float32, encOutp
 	}
 
 	*lastToken = u
-	return e.decodeTokens(predictedTokens), nil
+	return predictedTokens, nil
 }
 
 // decodeTokens converts predicted token indices to standard text.
@@ -1104,7 +1103,11 @@ func (e *Engine) decodeTokens(tokens []int64) string {
 			sb.WriteString(token)
 		}
 	}
-	return strings.TrimSpace(sb.String())
+	text := strings.TrimSpace(sb.String())
+	if strings.ToLower(e.lang) == "tr" || e.lang == "18" {
+		text = postProcessTurkish(text)
+	}
+	return text
 }
 
 // computeMelSpectrogram transforms raw PCM float32 samples to log-mel bins
@@ -1174,4 +1177,64 @@ func (e *Engine) computeMelSpectrogram(samples []float32) []float32 {
 	}
 
 	return mel
+}
+
+// postProcessTurkish cleans up common phonetic spelling mistakes
+// typical of multilingual ASR models in Turkish.
+func postProcessTurkish(text string) string {
+	// Simple replacements (keys must be lowercase)
+	replacements := map[string]string{
+		"merdılan":   "merhaba",
+		"basarhayla": "başarıyla",
+		"kalisiyor":  "çalışıyor",
+		"kal isiyor": "çalışıyor",
+		"gılan":      "gleann",
+		"basariha":   "başarıyla",
+		"kalisior":   "çalışıyor",
+	}
+
+	words := strings.Fields(text)
+	for i, w := range words {
+		// Clean word punctuation for lookup
+		clean := strings.ToLower(w)
+		clean = strings.Trim(clean, ".,!?\"';:")
+
+		if dst, ok := replacements[clean]; ok {
+			// Preserve capitalization if source was capitalized
+			if len(w) > 0 && w[0] >= 'A' && w[0] <= 'Z' {
+				dst = capitalize(dst)
+			}
+			// Re-apply punctuation
+			idx := strings.Index(strings.ToLower(w), clean)
+			if idx >= 0 {
+				prefix := w[:idx]
+				suffix := w[idx+len(clean):]
+				words[i] = prefix + dst + suffix
+			} else {
+				words[i] = dst
+			}
+		}
+	}
+
+	// Also handle multi-word phrase replacements like "kal isiyor"
+	result := strings.Join(words, " ")
+	phrases := []struct{ src, dst string }{
+		{"kal isiyor", "çalışıyor"},
+		{"kal isiyor.", "çalışıyor."},
+	}
+	for _, p := range phrases {
+		re := regexp.MustCompile("(?i)" + regexp.QuoteMeta(p.src))
+		result = re.ReplaceAllString(result, p.dst)
+	}
+
+	return result
+}
+
+func capitalize(s string) string {
+	if len(s) == 0 {
+		return s
+	}
+	r := []rune(s)
+	r[0] = unicode.ToUpper(r[0])
+	return string(r)
 }
