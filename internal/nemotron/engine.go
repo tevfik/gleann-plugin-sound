@@ -644,10 +644,38 @@ func (e *Engine) TranscribeWindow(ctx context.Context, pcmData []int16, promptTe
 		samples[i] = float32(s) / 32768.0
 	}
 
+	// Log raw PCM amplitude to detect quiet microphone issues
+	var peakAmp float32
+	for _, s := range samples {
+		if s < 0 {
+			s = -s
+		}
+		if s > peakAmp {
+			peakAmp = s
+		}
+	}
+	log.Printf("[nemotron] window PCM: samples=%d, peak=%.4f", len(samples), peakAmp)
+
 	melSpec := e.computeMelSpectrogram(samples)
 	numFrames := len(melSpec) / nMels
 	if numFrames == 0 {
 		return core.StreamResult{}, promptText, nil
+	}
+
+	if len(melSpec) > 0 {
+		minM := melSpec[0]
+		maxM := melSpec[0]
+		var sumM float64
+		for _, v := range melSpec {
+			if v < minM {
+				minM = v
+			}
+			if v > maxM {
+				maxM = v
+			}
+			sumM += float64(v)
+		}
+		log.Printf("[nemotron] window Mel stats: min=%.4f, max=%.4f, avg=%.4f, frames=%d", minM, maxM, sumM/float64(len(melSpec)), numFrames)
 	}
 
 	const preEncodeCache = 9
@@ -1050,7 +1078,9 @@ func (e *Engine) greedyDecode(ctx context.Context, encOutData []float32, encOutp
 	return e.decodeTokens(predictedTokens), nil
 }
 
-// decodeTokens converts predicted token indices to standard text
+// decodeTokens converts predicted token indices to standard text.
+// Uses SentencePiece semantics: ▁ (U+2581) marks the start of a new word.
+// Tokens without a leading ▁ are sub-word pieces that continue the current word.
 func (e *Engine) decodeTokens(tokens []int64) string {
 	var sb strings.Builder
 	for _, id := range tokens {
@@ -1058,16 +1088,23 @@ func (e *Engine) decodeTokens(tokens []int64) string {
 			continue
 		}
 		token := e.vocab[id]
+		// Skip special tokens like <blank>, <unk>, <tr-TR>, etc.
 		if strings.HasPrefix(token, "<") && strings.HasSuffix(token, ">") {
 			continue
 		}
-		// Replace U+2581 or custom space block indicator '▁' with space
-		token = strings.ReplaceAll(token, "▁", " ")
-		sb.WriteString(token)
+		if strings.HasPrefix(token, "▁") {
+			// New word boundary: replace ▁ with a space and write the rest.
+			rest := strings.TrimPrefix(token, "▁")
+			if sb.Len() > 0 {
+				sb.WriteByte(' ')
+			}
+			sb.WriteString(rest)
+		} else {
+			// Sub-word continuation: concatenate directly (no space).
+			sb.WriteString(token)
+		}
 	}
-	text := sb.String()
-	text = strings.ReplaceAll(text, "  ", " ")
-	return strings.TrimSpace(text)
+	return strings.TrimSpace(sb.String())
 }
 
 // computeMelSpectrogram transforms raw PCM float32 samples to log-mel bins
