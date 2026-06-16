@@ -593,123 +593,188 @@ func (e *Engine) TranscribeWindow(ctx context.Context, pcmData []int16, promptTe
 		return core.StreamResult{}, promptText, nil
 	}
 
-	const targetFrames = 65
-	transposed := make([]float32, targetFrames*nMels)
-	for i := range transposed {
-		transposed[i] = -23.02585
-	}
-	chunkLen := 0
-	for f := 0; f < targetFrames; f++ {
-		if f < numFrames {
-			chunkLen++
-			for m := 0; m < nMels; m++ {
-				transposed[f*nMels+m] = melSpec[m*numFrames+f]
+	const preEncodeCache = 9
+	const chunkSize = 56
+	const targetFrames = 65 // preEncodeCache + chunkSize
+	var finalTexts []string
+
+	chunkIdx := 0
+	for chunkStart := 0; chunkStart < numFrames; chunkStart += chunkSize {
+		if ctx.Err() != nil {
+			break
+		}
+
+		// Prepare 65 frames for this chunk (shape [1, 65, 128])
+		transposed := make([]float32, targetFrames*nMels)
+		for i := range transposed {
+			transposed[i] = -23.02585
+		}
+		chunkLen := 0
+
+		// 1. Fill pre-encode cache from previous frames in this window
+		if chunkIdx > 0 && chunkStart >= preEncodeCache {
+			cacheStart := chunkStart - preEncodeCache
+			for f := 0; f < preEncodeCache; f++ {
+				frameIdx := cacheStart + f
+				chunkLen++
+				for m := 0; m < nMels; m++ {
+					transposed[f*nMels+m] = melSpec[m*numFrames+frameIdx]
+				}
+			}
+		} else {
+			// First chunk or near boundary: pad first 9 frames with silence value
+			chunkLen += preEncodeCache
+		}
+
+		// 2. Fill main chunk (up to 56 new frames)
+		mainLen := 0
+		for f := 0; f < chunkSize; f++ {
+			frameIdx := chunkStart + f
+			destIdx := preEncodeCache + f
+			if frameIdx < numFrames {
+				mainLen++
+				chunkLen++
+				for m := 0; m < nMels; m++ {
+					transposed[destIdx*nMels+m] = melSpec[m*numFrames+frameIdx]
+				}
 			}
 		}
-	}
 
-	audioSignalInput, err := ort.NewTensor(ort.NewShape(1, targetFrames, int64(nMels)), transposed)
-	if err != nil {
-		return core.StreamResult{}, promptText, fmt.Errorf("nemotron encoder input: %w", err)
-	}
-	defer audioSignalInput.Destroy()
-
-	lengthInput, err := ort.NewTensor(ort.NewShape(1), []int64{int64(chunkLen)})
-	if err != nil {
-		return core.StreamResult{}, promptText, fmt.Errorf("nemotron encoder length: %w", err)
-	}
-	defer lengthInput.Destroy()
-
-	cacheChanInput, err := ort.NewTensor(ort.NewShape(1, 24, 56, 1024), e.cacheChan)
-	if err != nil {
-		return core.StreamResult{}, promptText, fmt.Errorf("nemotron encoder cache channel: %w", err)
-	}
-	defer cacheChanInput.Destroy()
-
-	cacheTimeInput, err := ort.NewTensor(ort.NewShape(1, 24, 1024, 8), e.cacheTime)
-	if err != nil {
-		return core.StreamResult{}, promptText, fmt.Errorf("nemotron encoder cache time: %w", err)
-	}
-	defer cacheTimeInput.Destroy()
-
-	cacheChanLenInput, err := ort.NewTensor(ort.NewShape(1), e.cacheChanLen)
-	if err != nil {
-		return core.StreamResult{}, promptText, fmt.Errorf("nemotron encoder cache len: %w", err)
-	}
-	defer cacheChanLenInput.Destroy()
-
-	langID := int64(101) // Default auto-detect
-	if e.lang != "" {
-		if strings.HasPrefix(strings.ToLower(e.lang), "en") {
-			langID = 0 // Correct English index in prompt dictionary
-		} else if id, ok := nemotronLangIDs[strings.ToLower(e.lang)]; ok {
-			langID = id
+		// If no new frames were processed in this chunk, we can stop
+		if mainLen == 0 {
+			break
 		}
+
+		audioSignalInput, err := ort.NewTensor(ort.NewShape(1, targetFrames, int64(nMels)), transposed)
+		if err != nil {
+			return core.StreamResult{}, promptText, fmt.Errorf("nemotron encoder input: %w", err)
+		}
+
+		lengthInput, err := ort.NewTensor(ort.NewShape(1), []int64{int64(chunkLen)})
+		if err != nil {
+			audioSignalInput.Destroy()
+			return core.StreamResult{}, promptText, fmt.Errorf("nemotron encoder length: %w", err)
+		}
+
+		cacheChanInput, err := ort.NewTensor(ort.NewShape(1, 24, 56, 1024), e.cacheChan)
+		if err != nil {
+			audioSignalInput.Destroy()
+			lengthInput.Destroy()
+			return core.StreamResult{}, promptText, fmt.Errorf("nemotron encoder cache channel: %w", err)
+		}
+
+		cacheTimeInput, err := ort.NewTensor(ort.NewShape(1, 24, 1024, 8), e.cacheTime)
+		if err != nil {
+			audioSignalInput.Destroy()
+			lengthInput.Destroy()
+			cacheChanInput.Destroy()
+			return core.StreamResult{}, promptText, fmt.Errorf("nemotron encoder cache time: %w", err)
+		}
+
+		cacheChanLenInput, err := ort.NewTensor(ort.NewShape(1), e.cacheChanLen)
+		if err != nil {
+			audioSignalInput.Destroy()
+			lengthInput.Destroy()
+			cacheChanInput.Destroy()
+			cacheTimeInput.Destroy()
+			return core.StreamResult{}, promptText, fmt.Errorf("nemotron encoder cache len: %w", err)
+		}
+
+		langID := int64(101) // Default auto-detect
+		if e.lang != "" {
+			if strings.HasPrefix(strings.ToLower(e.lang), "en") {
+				langID = 0
+			} else if id, ok := nemotronLangIDs[strings.ToLower(e.lang)]; ok {
+				langID = id
+			}
+		}
+
+		langIDInput, err := ort.NewTensor(ort.NewShape(1), []int64{langID})
+		if err != nil {
+			audioSignalInput.Destroy()
+			lengthInput.Destroy()
+			cacheChanInput.Destroy()
+			cacheTimeInput.Destroy()
+			cacheChanLenInput.Destroy()
+			return core.StreamResult{}, promptText, fmt.Errorf("nemotron encoder lang id: %w", err)
+		}
+
+		encoderOutputs := []ort.Value{nil, nil, nil, nil, nil}
+		encoderInputs := []ort.Value{
+			audioSignalInput,
+			lengthInput,
+			cacheChanInput,
+			cacheTimeInput,
+			cacheChanLenInput,
+			langIDInput,
+		}
+
+		err = e.encoder.Run(encoderInputs, encoderOutputs)
+		audioSignalInput.Destroy()
+		lengthInput.Destroy()
+		cacheChanInput.Destroy()
+		cacheTimeInput.Destroy()
+		cacheChanLenInput.Destroy()
+		langIDInput.Destroy()
+		if err != nil {
+			return core.StreamResult{}, promptText, fmt.Errorf("nemotron encoder run failed: %w", err)
+		}
+
+		encOutput := encoderOutputs[0]
+
+		// Update causal caches for streaming continuation
+		nextCacheChanTensor := encoderOutputs[2].(*ort.Tensor[float32])
+		copy(e.cacheChan, nextCacheChanTensor.GetData())
+		encoderOutputs[2].Destroy()
+
+		nextCacheTimeTensor := encoderOutputs[3].(*ort.Tensor[float32])
+		copy(e.cacheTime, nextCacheTimeTensor.GetData())
+		encoderOutputs[3].Destroy()
+
+		nextCacheLenTensor := encoderOutputs[4].(*ort.Tensor[int64])
+		copy(e.cacheChanLen, nextCacheLenTensor.GetData())
+		encoderOutputs[4].Destroy()
+
+		// Destroy length output
+		if encoderOutputs[1] != nil {
+			encoderOutputs[1].Destroy()
+		}
+
+		encOutputShape := encOutput.GetShape()
+		encOutputLen := encOutputShape[1]
+
+		typedEncOutput, ok := encOutput.(*ort.Tensor[float32])
+		if !ok {
+			encOutput.Destroy()
+			return core.StreamResult{}, promptText, fmt.Errorf("nemotron: unexpected encoder output tensor type")
+		}
+		encOutData := typedEncOutput.GetData()
+
+		text, err := e.greedyDecode(ctx, encOutData, encOutputLen, e.decoderH, e.decoderC, &e.lastToken)
+		encOutput.Destroy()
+		if err != nil {
+			return core.StreamResult{}, promptText, err
+		}
+
+		if text != "" {
+			finalTexts = append(finalTexts, text)
+		}
+
+		chunkIdx++
 	}
 
-	langIDInput, err := ort.NewTensor(ort.NewShape(1), []int64{langID})
-	if err != nil {
-		return core.StreamResult{}, promptText, fmt.Errorf("nemotron encoder lang id: %w", err)
-	}
-	defer langIDInput.Destroy()
-
-	encoderOutputs := []ort.Value{nil, nil, nil, nil, nil}
-	encoderInputs := []ort.Value{
-		audioSignalInput,
-		lengthInput,
-		cacheChanInput,
-		cacheTimeInput,
-		cacheChanLenInput,
-		langIDInput,
-	}
-
-	if err := e.encoder.Run(encoderInputs, encoderOutputs); err != nil {
-		return core.StreamResult{}, promptText, fmt.Errorf("nemotron encoder run failed: %w", err)
-	}
-
-	encOutput := encoderOutputs[0]
-	defer encOutput.Destroy()
-
-	// Update causal caches for streaming continuation
-	nextCacheChanTensor := encoderOutputs[2].(*ort.Tensor[float32])
-	copy(e.cacheChan, nextCacheChanTensor.GetData())
-	encoderOutputs[2].Destroy()
-
-	nextCacheTimeTensor := encoderOutputs[3].(*ort.Tensor[float32])
-	copy(e.cacheTime, nextCacheTimeTensor.GetData())
-	encoderOutputs[3].Destroy()
-
-	nextCacheLenTensor := encoderOutputs[4].(*ort.Tensor[int64])
-	copy(e.cacheChanLen, nextCacheLenTensor.GetData())
-	encoderOutputs[4].Destroy()
-
-	// Destroy length output
-	if encoderOutputs[1] != nil {
-		encoderOutputs[1].Destroy()
-	}
-
-	encOutputShape := encOutput.GetShape()
-	encOutputLen := encOutputShape[1]
-
-	typedEncOutput, ok := encOutput.(*ort.Tensor[float32])
-	if !ok {
-		return core.StreamResult{}, promptText, fmt.Errorf("nemotron: unexpected encoder output tensor type")
-	}
-	encOutData := typedEncOutput.GetData()
-
-	text, err := e.greedyDecode(ctx, encOutData, encOutputLen, e.decoderH, e.decoderC, &e.lastToken)
-	if err != nil {
-		return core.StreamResult{}, promptText, err
-	}
+	combinedText := strings.Join(finalTexts, " ")
+	combinedText = strings.ReplaceAll(combinedText, "  ", " ")
+	combinedText = strings.TrimSpace(combinedText)
 
 	durSec := float64(len(pcmData)) / float64(sampleRate)
 
 	result := core.StreamResult{
-		Text: text,
+		Text: combinedText,
 		End:  time.Duration(durSec * float64(time.Second)),
 	}
 
-	log.Printf("[nemotron] streaming window: %q (%.1fs audio)", text, durSec)
+	log.Printf("[nemotron] streaming window: %q (%.1fs audio)", combinedText, durSec)
 
 	return result, promptText, nil
 }
