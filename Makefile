@@ -17,7 +17,7 @@ WHISPER_DIR ?= $(HOME)/whisper.cpp
 CGO_CFLAGS  := -I$(WHISPER_DIR)/include -I$(WHISPER_DIR)/ggml/include
 CGO_LDFLAGS := -L$(WHISPER_DIR)/build/src -L$(WHISPER_DIR)/build/ggml/src -lwhisper -lggml -lggml-cpu -lggml-base -lm -lstdc++ -lpthread -lgomp
 
-.PHONY: all build build-onnx build-all build-stub clean test lint run-dictate whisper-setup whisper-model onnx-model silero-model install setup-input release
+.PHONY: all build build-onnx build-all build-stub clean test lint run-dictate run-dictate-nemotron whisper-setup whisper-model onnx-model silero-model install setup-input release
 
 # ─── Default ──────────────────────────────────────────────────────────
 .PHONY: all build
@@ -213,6 +213,11 @@ run-transcribe: build
 
 run-dictate-onnx: build-onnx
 	$(BUILD_DIR)/$(BINARY)-onnx dictate --backend onnx --key "ctrl+alt+space" --model $(ONNX_MODEL_DIR)
+
+run-dictate-nemotron: build-onnx
+	ORT_LIB_PATH=/home/tevfik/WORKSPACE/nemotron-onnx-go/lib/libonnxruntime.so \
+	LD_LIBRARY_PATH=/home/tevfik/WORKSPACE/nemotron-onnx-go/lib \
+	$(BUILD_DIR)/$(BINARY)-onnx dictate --backend nemotron --key "ctrl+alt+space" --model /home/tevfik/WORKSPACE/nemotron-onnx-go/model
 
 # ─── Release ──────────────────────────────────────────────────────────
 .PHONY: release
