@@ -99,12 +99,30 @@ func buildHannWindow(n int) []float32 {
 func buildMelFilterbank(sr, fftSize, numMels int) []float32 {
 	fftBins := fftSize/2 + 1
 
-	// Convert Hz to mel scale.
+	// Convert Hz to Slaney mel scale.
 	hzToMel := func(hz float64) float64 {
-		return 2595.0 * math.Log10(1.0+hz/700.0)
+		f_min := 0.0
+		f_sp := 200.0 / 3.0
+		if hz < 1000.0 {
+			return (hz - f_min) / f_sp
+		}
+		min_log_hz := 1000.0
+		min_log_mel := (min_log_hz - f_min) / f_sp
+		logstep := math.Log(6.4) / 27.0
+		return min_log_mel + math.Log(hz/min_log_hz)/logstep
 	}
+
+	// Convert Slaney mel scale to Hz.
 	melToHz := func(mel float64) float64 {
-		return 700.0 * (math.Pow(10.0, mel/2595.0) - 1.0)
+		f_min := 0.0
+		f_sp := 200.0 / 3.0
+		min_log_hz := 1000.0
+		min_log_mel := (min_log_hz - f_min) / f_sp
+		if mel < min_log_mel {
+			return f_min + f_sp*mel
+		}
+		logstep := math.Log(6.4) / 27.0
+		return min_log_hz * math.Exp(logstep*(mel-min_log_mel))
 	}
 
 	melMin := hzToMel(0)
@@ -123,19 +141,23 @@ func buildMelFilterbank(sr, fftSize, numMels int) []float32 {
 		binIndices[i] = hz * float64(fftSize) / float64(sr)
 	}
 
-	// Build triangular filters.
+	// Build triangular filters with Slaney area normalization.
 	filters := make([]float32, numMels*fftBins)
 	for m := 0; m < numMels; m++ {
 		left := binIndices[m]
 		center := binIndices[m+1]
 		right := binIndices[m+2]
 
+		leftHz := melToHz(melPoints[m])
+		rightHz := melToHz(melPoints[m+2])
+		enorm := 2.0 / (rightHz - leftHz)
+
 		for k := 0; k < fftBins; k++ {
 			fk := float64(k)
 			if fk >= left && fk <= center && center > left {
-				filters[m*fftBins+k] = float32((fk - left) / (center - left))
+				filters[m*fftBins+k] = float32((fk-left)/(center-left)) * float32(enorm)
 			} else if fk > center && fk <= right && right > center {
-				filters[m*fftBins+k] = float32((right - fk) / (right - center))
+				filters[m*fftBins+k] = float32((right-fk)/(right-center)) * float32(enorm)
 			}
 		}
 	}

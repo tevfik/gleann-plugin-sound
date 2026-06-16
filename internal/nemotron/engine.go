@@ -103,6 +103,11 @@ type Engine struct {
 	cacheTime           []float32
 	cacheChanLen        []int64
 	streamPrompt        string
+
+	// Decoder states and history for streaming dictation window
+	decoderH            []float32
+	decoderC            []float32
+	lastToken           int64
 }
 
 // Compile-time interface validation
@@ -286,6 +291,9 @@ func NewEngine(modelDir string) (*Engine, error) {
 		cacheChan:    make([]float32, 1*24*56*1024),
 		cacheTime:    make([]float32, 1*24*1024*8),
 		cacheChanLen: []int64{0},
+		decoderH:     make([]float32, 2*1*640),
+		decoderC:     make([]float32, 2*1*640),
+		lastToken:    int64(13087),
 	}, nil
 }
 
@@ -349,38 +357,88 @@ func (e *Engine) TranscribeStreamSegments(ctx context.Context, pcmData []int16) 
 		return nil, nil
 	}
 
+	if len(melSpec) > 0 {
+		minM := melSpec[0]
+		maxM := melSpec[0]
+		var sumM float64
+		for _, v := range melSpec {
+			if v < minM {
+				minM = v
+			}
+			if v > maxM {
+				maxM = v
+			}
+			sumM += float64(v)
+		}
+		log.Printf("[nemotron] Mel spectrogram stats: min=%.4f, max=%.4f, avg=%.4f, frames=%d", minM, maxM, sumM/float64(len(melSpec)), numFrames)
+	}
+
 	// Causal cache variables for the duration of this transcription stream
 	streamCacheChan := make([]float32, 1*24*56*1024)
 	streamCacheTime := make([]float32, 1*24*1024*8)
 	streamCacheChanLen := []int64{0}
 
-	const targetFrames = 65
+	// Decoder states and history for the duration of this transcription stream
+	hInData := make([]float32, 2*1*640)
+	cInData := make([]float32, 2*1*640)
+	lastToken := int64(13087)
+
+	const preEncodeCache = 9
+	const chunkSize = 56
+	const targetFrames = 65 // preEncodeCache + chunkSize
 	var finalTexts []string
 
-	// Process in sequential chunks of targetFrames (65)
-	for chunkStart := 0; chunkStart < numFrames; chunkStart += targetFrames {
+	chunkIdx := 0
+	// Process in sequential chunks of chunkSize (56)
+	for chunkStart := 0; chunkStart < numFrames; chunkStart += chunkSize {
 		if ctx.Err() != nil {
 			break
 		}
 
-		// Prepare 65 frames for this chunk
+		// Prepare 65 frames for this chunk (shape [1, 65, 128])
 		transposed := make([]float32, targetFrames*nMels)
+		for i := range transposed {
+			transposed[i] = -23.02585
+		}
 		chunkLen := 0
-		for f := 0; f < targetFrames; f++ {
-			frameIdx := chunkStart + f
-			if frameIdx < numFrames {
+
+		// 1. Fill pre-encode cache from previous frames
+		if chunkIdx > 0 && chunkStart >= preEncodeCache {
+			cacheStart := chunkStart - preEncodeCache
+			for f := 0; f < preEncodeCache; f++ {
+				frameIdx := cacheStart + f
 				chunkLen++
 				for m := 0; m < nMels; m++ {
 					transposed[f*nMels+m] = melSpec[m*numFrames+frameIdx]
 				}
-			} else {
-				// Pad with silence value
+			}
+		} else {
+			// First chunk or near boundary: pad first 9 frames with silence value
+			chunkLen += preEncodeCache
+		}
+
+		// 2. Fill main chunk (up to 56 new frames)
+		mainLen := 0
+		for f := 0; f < chunkSize; f++ {
+			frameIdx := chunkStart + f
+			destIdx := preEncodeCache + f
+			if frameIdx < numFrames {
+				mainLen++
+				chunkLen++
 				for m := 0; m < nMels; m++ {
-					transposed[f*nMels+m] = -10.0
+					transposed[destIdx*nMels+m] = melSpec[m*numFrames+frameIdx]
 				}
+			} else {
+				// Pad remaining frames with silence value
 			}
 		}
 
+		// If no new frames were processed in this chunk, we can stop
+		if mainLen == 0 {
+			break
+		}
+
+		// Shape must be [1, targetFrames (65), nMels (128)] to match model layout
 		audioSignalInput, err := ort.NewTensor(ort.NewShape(1, targetFrames, int64(nMels)), transposed)
 		if err != nil {
 			return nil, fmt.Errorf("nemotron encoder input: %w", err)
@@ -416,9 +474,11 @@ func (e *Engine) TranscribeStreamSegments(ctx context.Context, pcmData []int16) 
 			return nil, fmt.Errorf("nemotron encoder cache len: %w", err)
 		}
 
-		langID := int64(24) // Default English en-US
+		langID := int64(101) // Default auto-detect
 		if e.lang != "" {
-			if id, ok := nemotronLangIDs[strings.ToLower(e.lang)]; ok {
+			if strings.HasPrefix(strings.ToLower(e.lang), "en") {
+				langID = 0 // Correct English index in prompt dictionary
+			} else if id, ok := nemotronLangIDs[strings.ToLower(e.lang)]; ok {
 				langID = id
 			}
 		}
@@ -484,7 +544,7 @@ func (e *Engine) TranscribeStreamSegments(ctx context.Context, pcmData []int16) 
 		encOutData := typedEncOutput.GetData()
 
 		// Run greedy decoding on this chunk's encoded outputs
-		text, err := e.greedyDecode(ctx, encOutData, encOutputLen)
+		text, err := e.greedyDecode(ctx, encOutData, encOutputLen, hInData, cInData, &lastToken)
 		encOutput.Destroy()
 		if err != nil {
 			return nil, err
@@ -493,6 +553,8 @@ func (e *Engine) TranscribeStreamSegments(ctx context.Context, pcmData []int16) 
 		if text != "" {
 			finalTexts = append(finalTexts, text)
 		}
+
+		chunkIdx++
 	}
 
 	combinedText := strings.Join(finalTexts, " ")
@@ -533,17 +595,15 @@ func (e *Engine) TranscribeWindow(ctx context.Context, pcmData []int16, promptTe
 
 	const targetFrames = 65
 	transposed := make([]float32, targetFrames*nMels)
+	for i := range transposed {
+		transposed[i] = -23.02585
+	}
 	chunkLen := 0
 	for f := 0; f < targetFrames; f++ {
 		if f < numFrames {
 			chunkLen++
 			for m := 0; m < nMels; m++ {
 				transposed[f*nMels+m] = melSpec[m*numFrames+f]
-			}
-		} else {
-			// Pad with silence value
-			for m := 0; m < nMels; m++ {
-				transposed[f*nMels+m] = -10.0
 			}
 		}
 	}
@@ -578,9 +638,11 @@ func (e *Engine) TranscribeWindow(ctx context.Context, pcmData []int16, promptTe
 	}
 	defer cacheChanLenInput.Destroy()
 
-	langID := int64(24) // Default English en-US
+	langID := int64(101) // Default auto-detect
 	if e.lang != "" {
-		if id, ok := nemotronLangIDs[strings.ToLower(e.lang)]; ok {
+		if strings.HasPrefix(strings.ToLower(e.lang), "en") {
+			langID = 0 // Correct English index in prompt dictionary
+		} else if id, ok := nemotronLangIDs[strings.ToLower(e.lang)]; ok {
 			langID = id
 		}
 	}
@@ -635,7 +697,7 @@ func (e *Engine) TranscribeWindow(ctx context.Context, pcmData []int16, promptTe
 	}
 	encOutData := typedEncOutput.GetData()
 
-	text, err := e.greedyDecode(ctx, encOutData, encOutputLen)
+	text, err := e.greedyDecode(ctx, encOutData, encOutputLen, e.decoderH, e.decoderC, &e.lastToken)
 	if err != nil {
 		return core.StreamResult{}, promptText, err
 	}
@@ -666,6 +728,16 @@ func (e *Engine) ResetStream() {
 	}
 	e.cacheChanLen[0] = 0
 	e.streamPrompt = ""
+
+	// Reset persistent decoder states to zeros and blankToken
+	for i := range e.decoderH {
+		e.decoderH[i] = 0
+	}
+	for i := range e.decoderC {
+		e.decoderC[i] = 0
+	}
+	e.lastToken = int64(13087)
+
 	log.Println("[nemotron] stream context caches reset")
 }
 
@@ -716,14 +788,12 @@ func (e *Engine) TranscribeFile(ctx context.Context, filepath string) ([]core.Se
 }
 
 // greedyDecode performs RNN-T greedy decoding loop over all frames
-func (e *Engine) greedyDecode(ctx context.Context, encOutData []float32, encOutputLen int64) (string, error) {
+func (e *Engine) greedyDecode(ctx context.Context, encOutData []float32, encOutputLen int64, hInData, cInData []float32, lastToken *int64) (string, error) {
 	blankToken := int64(13087)
-	u := int64(0) // Start/unk token
+	u := *lastToken
 
 	hInShape := ort.NewShape(2, 1, 640)
-	hInData := make([]float32, 2*1*640)
 	cInShape := ort.NewShape(2, 1, 640)
-	cInData := make([]float32, 2*1*640)
 
 	var predictedTokens []int64
 
@@ -814,6 +884,16 @@ func (e *Engine) greedyDecode(ctx context.Context, encOutData []float32, encOutp
 			}
 			y := int64(maxIdx)
 
+			if t < 5 && symbolsCount == 0 {
+				var tokenStr string
+				if y >= 0 && y < int64(len(e.vocab)) {
+					tokenStr = e.vocab[y]
+				} else {
+					tokenStr = "OUT_OF_BOUNDS"
+				}
+				log.Printf("[nemotron] Frame %d: y=%d (%q), logit=%.4f (blank=%d, blank_logit=%.4f)", t, y, tokenStr, maxVal, blankToken, logits[blankToken])
+			}
+
 			logitsTensor.Destroy()
 			decoderOutputs[0].Destroy()
 
@@ -842,6 +922,7 @@ func (e *Engine) greedyDecode(ctx context.Context, encOutData []float32, encOutp
 		frameTensor.Destroy()
 	}
 
+	*lastToken = u
 	return e.decodeTokens(predictedTokens), nil
 }
 
@@ -873,6 +954,23 @@ func (e *Engine) computeMelSpectrogram(samples []float32) []float32 {
 		samples = padded
 	}
 
+	// Apply preemphasis: s[t] = x[t] - 0.97 * x[t-1]
+	preemphasized := make([]float32, len(samples))
+	if len(samples) > 0 {
+		preemphasized[0] = samples[0]
+		for i := 1; i < len(samples); i++ {
+			preemphasized[i] = samples[i] - 0.97*samples[i-1]
+		}
+	}
+	samples = preemphasized
+
+	// Center padding: pad by nFFT / 2 (256) samples on both ends.
+	// This matches center=True in librosa/torchaudio.
+	const padSize = nFFT / 2
+	paddedSamples := make([]float32, len(samples)+2*padSize)
+	copy(paddedSamples[padSize:], samples)
+	samples = paddedSamples
+
 	numFrames := (len(samples) - windowLength) / hopLength + 1
 	if numFrames < 1 {
 		numFrames = 1
@@ -889,11 +987,14 @@ func (e *Engine) computeMelSpectrogram(samples []float32) []float32 {
 
 	for frame := 0; frame < numFrames; frame++ {
 		offset := frame * hopLength
-		end := offset + windowLength
-		if end > len(samples) {
-			end = len(samples)
+		var frameData []float32
+		if offset < len(samples) {
+			end := offset + windowLength
+			if end > len(samples) {
+				end = len(samples)
+			}
+			frameData = samples[offset:end]
 		}
-		frameData := samples[offset:end]
 
 		fftMagnitudeSquared(frameData, window, fftReal, fftImag, frameMag)
 		copy(magnitudes[frame*fftBins:], frameMag)
@@ -906,10 +1007,8 @@ func (e *Engine) computeMelSpectrogram(samples []float32) []float32 {
 			for k := 0; k < fftBins; k++ {
 				sum += e.melFilters[m*fftBins+k] * magnitudes[frame*fftBins+k]
 			}
-			if sum < 1e-10 {
-				sum = 1e-10
-			}
-			mel[m*numFrames+frame] = float32(math.Log10(float64(sum)))
+			// NeMo/Nemotron expects natural log (ln) with 2^-24 (5.9604645e-8) zero guard
+			mel[m*numFrames+frame] = float32(math.Log(float64(sum) + 5.9604645e-8))
 		}
 	}
 

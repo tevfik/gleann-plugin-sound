@@ -16,7 +16,7 @@ import (
 )
 
 // ONNXRuntimeVersion is the pinned ONNX Runtime version to download.
-const ONNXRuntimeVersion = "1.21.1"
+const ONNXRuntimeVersion = "1.26.0"
 
 // ONNXRuntimeInfo describes a platform-specific ONNX Runtime download.
 type ONNXRuntimeInfo struct {
