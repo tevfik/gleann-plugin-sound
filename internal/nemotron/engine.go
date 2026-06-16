@@ -413,6 +413,22 @@ func (e *Engine) TranscribeStreamSegments(ctx context.Context, pcmData []int16) 
 		samples[i] = float32(s) / 32768.0
 	}
 
+	// Log raw PCM amplitude and RMS to detect quiet microphone issues
+	var peakAmp float32
+	var sumSq float64
+	for _, s := range samples {
+		absVal := s
+		if absVal < 0 {
+			absVal = -absVal
+		}
+		if absVal > peakAmp {
+			peakAmp = absVal
+		}
+		sumSq += float64(s) * float64(s)
+	}
+	rmsPcm := math.Sqrt(sumSq / float64(len(samples)))
+	log.Printf("[nemotron] PCM signal stats: samples=%d, peak=%.4f, RMS=%.4f", len(samples), peakAmp, rmsPcm)
+
 	melSpec := e.computeMelSpectrogram(samples)
 	numFrames := len(melSpec) / nMels
 	if numFrames == 0 {
