@@ -429,6 +429,13 @@ func (e *Engine) TranscribeStreamSegments(ctx context.Context, pcmData []int16) 
 	rmsPcm := math.Sqrt(sumSq / float64(len(samples)))
 	log.Printf("[nemotron] PCM signal stats: samples=%d, peak=%.4f, RMS=%.4f", len(samples), peakAmp, rmsPcm)
 
+	// Apply peak normalization to the input signal to bring it to a healthy range for the model
+	if peakAmp > 1e-6 {
+		for i := range samples {
+			samples[i] /= (peakAmp + 1e-5)
+		}
+	}
+
 	melSpec := e.computeMelSpectrogram(samples)
 	numFrames := len(melSpec) / nMels
 	if numFrames == 0 {
@@ -674,6 +681,13 @@ func (e *Engine) TranscribeWindow(ctx context.Context, pcmData []int16, promptTe
 		}
 	}
 	log.Printf("[nemotron] window PCM: samples=%d, peak=%.4f", len(samples), peakAmp)
+
+	// Apply peak normalization to the input signal to bring it to a healthy range for the model
+	if peakAmp > 1e-6 {
+		for i := range samples {
+			samples[i] /= (peakAmp + 1e-5)
+		}
+	}
 
 	melSpec := e.computeMelSpectrogram(samples)
 	numFrames := len(melSpec) / nMels
