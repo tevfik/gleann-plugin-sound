@@ -352,7 +352,10 @@ func (p *StreamingPipeline) flush(ctx context.Context, onResult OnResult) {
 	promptText := p.promptText
 	p.mu.Unlock()
 
+	log.Printf("[pipeline] flush called: remaining=%d samples, overlap=%d samples, minSpeechSamp=%d", len(remaining), len(overlapBuf), p.minSpeechSamp)
+
 	if len(remaining) < p.minSpeechSamp {
+		log.Printf("[pipeline] flush skipped: remaining samples (%d) < minSpeechSamp (%d)", len(remaining), p.minSpeechSamp)
 		return
 	}
 
@@ -367,12 +370,14 @@ func (p *StreamingPipeline) flush(ctx context.Context, onResult OnResult) {
 	}
 
 	if !p.hasSufficientSpeech(window) {
+		log.Printf("[pipeline] flush skipped: insufficient speech detected in window")
 		return
 	}
 
 	windowStart := time.Duration(float64(seq)*p.cfg.StepSizeSec*1000) * time.Millisecond
 	windowEnd := windowStart + time.Duration(float64(len(window))/SampleRate*1000)*time.Millisecond
 
+	log.Printf("[pipeline] flush transcribing window #%d (%d samples)...", seq, len(window))
 	result, _, err := p.transcriber.TranscribeWindow(ctx, window, promptText)
 	if err != nil {
 		log.Printf("[pipeline] flush window #%d: transcription error: %v", seq, err)
@@ -380,6 +385,7 @@ func (p *StreamingPipeline) flush(ctx context.Context, onResult OnResult) {
 	}
 
 	if result.Text == "" {
+		log.Printf("[pipeline] flush window #%d: transcribed empty text", seq)
 		return
 	}
 

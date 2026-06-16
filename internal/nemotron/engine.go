@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,47 +23,91 @@ import (
 	"github.com/tevfik/gleann-plugin-sound/internal/core"
 )
 
-// Language token IDs for standard languages in Nemotron ASR
 var nemotronLangIDs = map[string]int64{
-	"bg":    0,  "bg-bg": 0,
-	"cs":    1,  "cs-cz": 1,
-	"da":    2,  "da-dk": 2,
-	"de":    3,  "de-de": 3,
-	"el":    4,  "el-gr": 4,
-	"et":    5,  "et-ee": 5,
-	"fi":    6,  "fi-fi": 6,
-	"fr":    7,  "fr-fr": 7,
-	"hu":    8,  "hu-hu": 8,
-	"hr":    9,  "hr-hr": 9,
-	"it":    10, "it-it": 10,
-	"lt":    11, "lt-lt": 11,
-	"lv":    12, "lv-lv": 12,
-	"nl":    13, "nl-nl": 13,
-	"pl":    14, "pl-pl": 14,
-	"pt":    15, "pt-br": 15,
-	"ro":    16, "ro-ro": 16,
-	"ru":    17, "ru-ru": 17,
-	"sk":    18, "sk-sk": 18,
-	"sl":    19, "sl-sl": 19,
-	"sv":    20, "sv-se": 20,
-	"uk":    21, "uk-ua": 21,
-	"ar":    22, "ar-ar": 22,
-	"en-gb": 23,
-	"en":    24, "en-us": 24,
-	"es":    25, "es-es": 25,
-	"es-us": 26,
-	"fr-ca": 27,
-	"he":    28, "he-il": 28,
-	"hi":    29, "hi-in": 29,
-	"ja":    30, "ja-jp": 30,
-	"ko":    31, "ko-kr": 31,
-	"nb":    32, "nb-no": 32,
-	"nn":    33, "nn-no": 33,
-	"pt-pt": 34,
-	"th":    35, "th-th": 35,
-	"tr":    36, "tr-tr": 36,
-	"zh":    37, "zh-cn": 37,
-	"vi":    38, "vi-vn": 38,
+	"en-us": 0, "en": 0,
+	"en-gb": 1,
+	"es-es": 2, "es": 2,
+	"es-us": 3,
+	"zh-cn": 4, "zh": 4,
+	"zh-tw": 5,
+	"hi-in": 6, "hi": 6,
+	"ar-ar": 7, "ar": 7,
+	"fr-fr": 8, "fr": 8,
+	"de-de": 9, "de": 9,
+	"ja-jp": 10, "ja": 10,
+	"ru-ru": 11, "ru": 11,
+	"pt-br": 12, "pt": 12,
+	"pt-pt": 13,
+	"ko-kr": 14, "ko": 14,
+	"it-it": 15, "it": 15,
+	"nl-nl": 16, "nl": 16,
+	"pl-pl": 17, "pl": 17,
+	"tr-tr": 18, "tr": 18,
+	"uk-ua": 19, "uk": 19,
+	"ro-ro": 20, "ro": 20,
+	"el-gr": 21, "el": 21,
+	"cs-cz": 22, "cs": 22,
+	"hu-hu": 23, "hu": 23,
+	"sv-se": 24, "sv": 24,
+	"da-dk": 25, "da": 25,
+	"fi-fi": 26, "fi": 26,
+	"no-no": 27, "no": 27,
+	"sk-sk": 28, "sk": 28,
+	"hr-hr": 29, "hr": 29,
+	"bg-bg": 30, "bg": 30,
+	"lt-lt": 31, "lt": 31,
+	"th-th": 32, "th": 32,
+	"vi-vn": 33, "vi": 33,
+	"id-id": 34, "id": 34,
+	"ms-my": 35, "ms": 35,
+	"bn-in": 36, "bn": 36,
+	"ur-pk": 37, "ur": 37,
+	"fa-ir": 38, "fa": 38,
+	"ta-in": 39, "ta": 39,
+	"te-in": 40, "te": 40,
+	"mr-in": 41, "mr": 41,
+	"gu-in": 42, "gu": 42,
+	"kn-in": 43, "kn": 43,
+	"ml-in": 44, "ml": 44,
+	"si-lk": 45, "si": 45,
+	"ne-np": 46, "ne": 46,
+	"km-kh": 47, "km": 47,
+	"sw-ke": 48, "sw": 48,
+	"am-et": 49, "am": 49,
+	"ha-ng": 50, "ha": 50,
+	"zu-za": 51, "zu": 51,
+	"yo-ng": 52, "yo": 52,
+	"ig-ng": 53, "ig": 53,
+	"af-za": 54, "af": 54,
+	"rw-rw": 55, "rw": 55,
+	"so-so": 56, "so": 56,
+	"ny-mw": 57, "ny": 57,
+	"ln-cd": 58, "ln": 58,
+	"or-ke": 59, "or": 59,
+	"et-ee": 60,
+	"lv-lv": 61,
+	"sl-si": 62, "sl": 62,
+	"he-il": 64, "he": 64,
+	"ku-tr": 65, "ku": 65,
+	"az-az": 66, "az": 66,
+	"ka-ge": 67, "ka": 67,
+	"hy-am": 68, "hy": 68,
+	"uz-uz": 69, "uz": 69,
+	"tg-tj": 70, "tg": 70,
+	"ky-kg": 71, "ky": 71,
+	"qu-pe": 80, "qu": 80,
+	"ay-bo": 81, "ay": 81,
+	"gn-py": 82, "gn": 82,
+	"nah-mx": 83, "nah": 83,
+	"mi-nz": 96, "mi": 96,
+	"haw-us": 97, "haw": 97,
+	"sm-ws": 98, "sm": 98,
+	"to-to": 99, "to": 99,
+	"fr-ca": 100,
+	"mt-mt": 102, "mt": 102,
+	"nb-no": 103,
+	"nn-no": 104,
+	"auto": 101,
 }
 
 // Execution providers matching onnx package settings
@@ -175,6 +220,11 @@ func discoverONNXLibrary() bool {
 	return false
 }
 
+var (
+	initEnvOnce sync.Once
+	initEnvErr  error
+)
+
 // NewEngine creates a new Nemotron ASR engine session
 func NewEngine(modelDir string) (*Engine, error) {
 	if !discoverONNXLibrary() {
@@ -186,8 +236,13 @@ func NewEngine(modelDir string) (*Engine, error) {
 		ort.SetSharedLibraryPath(libPath)
 	}
 
-	if err := ort.InitializeEnvironment(); err != nil {
-		return nil, fmt.Errorf("nemotron: failed to initialize runtime env: %w", err)
+	initEnvOnce.Do(func() {
+		initEnvErr = ort.InitializeEnvironment()
+	})
+	if initEnvErr != nil {
+		if !strings.Contains(initEnvErr.Error(), "already been initialized") {
+			return nil, fmt.Errorf("nemotron: failed to initialize runtime env: %w", initEnvErr)
+		}
 	}
 
 	encoderPath := filepath.Join(modelDir, "encoder.onnx")
@@ -476,7 +531,9 @@ func (e *Engine) TranscribeStreamSegments(ctx context.Context, pcmData []int16) 
 
 		langID := int64(101) // Default auto-detect
 		if e.lang != "" {
-			if strings.HasPrefix(strings.ToLower(e.lang), "en") {
+			if id, err := strconv.ParseInt(e.lang, 10, 64); err == nil {
+				langID = id
+			} else if strings.HasPrefix(strings.ToLower(e.lang), "en") {
 				langID = 0 // Correct English index in prompt dictionary
 			} else if id, ok := nemotronLangIDs[strings.ToLower(e.lang)]; ok {
 				langID = id
@@ -682,7 +739,9 @@ func (e *Engine) TranscribeWindow(ctx context.Context, pcmData []int16, promptTe
 
 		langID := int64(101) // Default auto-detect
 		if e.lang != "" {
-			if strings.HasPrefix(strings.ToLower(e.lang), "en") {
+			if id, err := strconv.ParseInt(e.lang, 10, 64); err == nil {
+				langID = id
+			} else if strings.HasPrefix(strings.ToLower(e.lang), "en") {
 				langID = 0
 			} else if id, ok := nemotronLangIDs[strings.ToLower(e.lang)]; ok {
 				langID = id
@@ -1072,8 +1131,8 @@ func (e *Engine) computeMelSpectrogram(samples []float32) []float32 {
 			for k := 0; k < fftBins; k++ {
 				sum += e.melFilters[m*fftBins+k] * magnitudes[frame*fftBins+k]
 			}
-			// NeMo/Nemotron expects natural log (ln) with 2^-24 (5.9604645e-8) zero guard
-			mel[m*numFrames+frame] = float32(math.Log(float64(sum) + 5.9604645e-8))
+			// NeMo/Nemotron expects natural log (ln) with 1e-10 zero guard
+			mel[m*numFrames+frame] = float32(math.Log(float64(sum) + 1e-10))
 		}
 	}
 
