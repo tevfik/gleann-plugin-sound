@@ -1224,6 +1224,7 @@ func (e *Engine) postProcessTurkish(text string) string {
 		"sey":        "sesli",
 		"basarhayla": "başarıyla",
 		"kalisiyor":  "çalışıyor",
+		"kalesiyor":  "çalışıyor",
 		"gılan":      "gleann",
 		"basariha":   "başarıyla",
 		"kalisior":   "çalışıyor",

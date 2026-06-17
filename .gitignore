@@ -2,8 +2,7 @@
 build/
 
 # Whisper and ONNX models (large binary files)
-models/*.bin
-models/*.onnx
+models/
 
 # Coverage
 coverage.out
@@ -17,3 +16,15 @@ coverage.out
 # OS
 .DS_Store
 Thumbs.db
+
+# Virtual environments and dependencies
+test/benchmark/venv/
+lib/
+
+# Test/Benchmark data
+test/testdata/fleurs_tr/
+test/testdata/youtube/
+
+# Logs
+*.log
+
