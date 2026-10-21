@@ -34,11 +34,13 @@ func (e *Engine) TranscribeFile(_ context.Context, _ string) ([]core.Segment, er
 
 func (e *Engine) SetLanguage(_ string) {}
 
-func (e *Engine) TranscribeWindow(_ context.Context, _ []int16, promptText string) (core.StreamResult, string, error) {
-	return core.StreamResult{}, promptText, fmt.Errorf("nemotron stub: not compiled with onnx build tag")
+func (e *Engine) NewLiveStream() (core.LiveStream, error) {
+	return nil, fmt.Errorf("nemotron stub: not compiled with onnx build tag")
 }
 
-func (e *Engine) ResetStream() {}
+func (e *Engine) NewLiveStreamLang(string) (core.LiveStream, error) {
+	return nil, fmt.Errorf("nemotron stub: not compiled with onnx build tag")
+}
 
 func (e *Engine) Close() error { return nil }
 

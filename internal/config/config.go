@@ -16,8 +16,8 @@ import (
 // Config holds the persisted gleann-plugin-sound configuration.
 type Config struct {
 	// Model settings.
-	DefaultModel string `json:"default_model"`          // e.g. "~/.gleann/models/ggml-small.bin"
-	Language      string `json:"language,omitempty"`      // e.g. "tr", "" = auto-detect
+	DefaultModel string `json:"default_model"`      // e.g. "~/.gleann/models/ggml-small.bin"
+	Language     string `json:"language,omitempty"` // e.g. "tr", "" = auto-detect
 
 	// Hotkey settings (dictate mode).
 	Hotkey string `json:"hotkey,omitempty"` // e.g. "ctrl+shift+space"
@@ -26,7 +26,7 @@ type Config struct {
 	Models []ModelEntry `json:"models,omitempty"`
 
 	// Backend selection.
-	Backend string `json:"backend,omitempty"` // "whisper" (default) or "onnx"
+	Backend string `json:"backend,omitempty"` // "whisper" (default), "onnx", "nemotron" or "tc"
 
 	// Execution provider for ONNX backend: "auto" (default), "cuda", "cpu".
 	// "auto" tries CUDA first, falls back to CPU.
@@ -35,11 +35,22 @@ type Config struct {
 	// Audio source: "mic" (default), "speaker" (loopback), "both".
 	AudioSource string `json:"audio_source,omitempty"`
 
+	// RefineModel is a GGUF model (Qwen3-ASR) that re-transcribes finished
+	// utterances in the background; see 'listen --refine-model'.
+	RefineModel string `json:"refine_model,omitempty"`
+
+	// SpeakerModel is the TitaNet ONNX file (default
+	// ~/.gleann/models/nemo_en_titanet_small.onnx); SpeakerThreshold the cosine
+	// an utterance must reach to count as an enrolled voice (default 0.35).
+	SpeakerModel     string  `json:"speaker_model,omitempty"`
+	SpeakerThreshold float64 `json:"speaker_threshold,omitempty"`
+
+	// Corrections rewrites words the recogniser gets systematically wrong
+	// (names, jargon): {"gılan": "gleann"}. Keys with spaces match phrases.
+	Corrections map[string]string `json:"corrections,omitempty"`
+
 	// Output directory for transcription results.
 	OutputDir string `json:"output_dir,omitempty"` // e.g. "~/transcriptions"
-
-	// gRPC settings (optional — enables gRPC server alongside dictation).
-	GRPCAddr string `json:"grpc_addr,omitempty"` // e.g. "localhost:50051"
 
 	// Install state.
 	InstallPath           string `json:"install_path,omitempty"`
@@ -54,10 +65,10 @@ type Config struct {
 
 // ModelEntry describes a downloaded Whisper model.
 type ModelEntry struct {
-	Name     string `json:"name"`      // e.g. "small"
-	Path     string `json:"path"`      // absolute path
-	Size     string `json:"size"`      // human-readable
-	Language string `json:"language"`  // "multilingual" or "en"
+	Name     string `json:"name"`     // e.g. "small"
+	Path     string `json:"path"`     // absolute path
+	Size     string `json:"size"`     // human-readable
+	Language string `json:"language"` // "multilingual" or "en"
 }
 
 // WhisperModel describes an available model for download.
@@ -65,12 +76,12 @@ type ModelEntry struct {
 // For multi-file bundles (ONNX), BundleFiles lists relative paths and URLs,
 // and FileName is the subdirectory name (e.g. "whisper-base.en-onnx").
 type WhisperModel struct {
-	Name        string // e.g. "tiny", "base", "small"
-	DisplayName string // e.g. "Tiny (75 MB)"
-	FileName    string // e.g. "ggml-tiny.bin" or "whisper-base.en-onnx" (directory)
-	Size        string // e.g. "75 MB"
+	Name         string // e.g. "tiny", "base", "small"
+	DisplayName  string // e.g. "Tiny (75 MB)"
+	FileName     string // e.g. "ggml-tiny.bin" or "whisper-base.en-onnx" (directory)
+	Size         string // e.g. "75 MB"
 	Multilingual bool
-	URL         string // single-file download URL (empty for bundles)
+	URL          string // single-file download URL (empty for bundles)
 
 	// BundleFiles lists files to download into a subdirectory.
 	// Each entry maps a relative filename to its download URL.
@@ -186,7 +197,6 @@ func AvailableNemotronModels() []WhisperModel {
 		},
 	}
 }
-
 
 // DefaultDir returns the gleann config directory: ~/.gleann
 func DefaultDir() string {

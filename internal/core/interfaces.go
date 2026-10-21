@@ -23,6 +23,8 @@ type Segment struct {
 	End time.Duration `json:"end"`
 	// Text is the transcribed content for this segment.
 	Text string `json:"text"`
+	// Speaker names who spoke when speaker identification is on ("?" = unknown).
+	Speaker string `json:"speaker,omitempty"`
 }
 
 // Transcriber handles the conversion of audio data to text using whisper.cpp.
@@ -121,11 +123,11 @@ type KeyboardInjector interface {
 }
 
 // ---------------------------------------------------------------------------
-// Plugin / RPC
+// Plugin / streaming events
 // ---------------------------------------------------------------------------
 
 // TranscriptionEvent is the payload streamed from the daemon to the main gleann
-// application over gRPC.
+// application (for example over the /live WebSocket).
 type TranscriptionEvent struct {
 	// Segments contains one or more timestamped transcriptions.
 	Segments []Segment `json:"segments"`
@@ -134,7 +136,7 @@ type TranscriptionEvent struct {
 }
 
 // TranscriptionHandler is a callback-style sink for streaming transcription
-// events consumed by the gRPC plugin layer.
+// events consumed by the plugin server.
 type TranscriptionHandler func(event TranscriptionEvent)
 
 // ---------------------------------------------------------------------------

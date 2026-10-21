@@ -6,11 +6,14 @@ package audio
 import (
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"sync"
 
 	ort "github.com/yalue/onnxruntime_go"
 
 	"github.com/tevfik/gleann-plugin-sound/internal/core"
+	"github.com/tevfik/gleann-plugin-sound/internal/ortrt"
 )
 
 // Compile-time check: SileroVAD satisfies core.VADProvider.
@@ -38,7 +41,13 @@ type SileroVAD struct {
 	mu      sync.Mutex
 	session *ort.DynamicAdvancedSession
 
-	// LSTM state carried across calls.
+	// v5 models take (input, state, sr) with a 64-sample context in front of
+	// every 512-sample chunk; v4 models take (input, sr, h, c).
+	v5      bool
+	state   []float32 // v5: [2*1*128]
+	context []float32 // v5: last 64 samples of the previous chunk
+
+	// LSTM state carried across calls (v4).
 	hData []float32 // [2*1*64 = 128]
 	cData []float32 // [2*1*64 = 128]
 
@@ -55,6 +64,7 @@ type SileroVAD struct {
 const (
 	sileroChunkSize = 512 // samples per Silero inference (32ms @ 16kHz)
 	sileroStateSize = 128 // 2 * 1 * 64
+	sileroContext   = 64  // v5: samples of left context per chunk
 )
 
 // NewSileroVAD loads the Silero VAD ONNX model and returns a ready-to-use VAD.
@@ -62,13 +72,25 @@ const (
 // modelPath should point to the silero_vad.onnx file.
 // Download from: https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx
 func NewSileroVAD(modelPath string) (*SileroVAD, error) {
-	if err := ort.InitializeEnvironment(); err != nil {
-		return nil, fmt.Errorf("silero vad: failed to initialize ONNX runtime: %w", err)
+	if err := ortrt.Ensure(); err != nil {
+		return nil, fmt.Errorf("silero vad: %w", err)
 	}
 
+	// The upstream model changed its interface between v4 and v5; detect it.
+	v5 := false
+	if ins, _, err := ort.GetInputOutputInfo(modelPath); err == nil {
+		for _, in := range ins {
+			if in.Name == "state" {
+				v5 = true
+			}
+		}
+	}
 	inputNames := []string{"input", "sr", "h", "c"}
 	outputNames := []string{"output", "hn", "cn"}
-
+	if v5 {
+		inputNames = []string{"input", "state", "sr"}
+		outputNames = []string{"output", "stateN"}
+	}
 	session, err := ort.NewDynamicAdvancedSession(modelPath, inputNames, outputNames, nil)
 	if err != nil {
 		return nil, fmt.Errorf("silero vad: failed to create session: %w", err)
@@ -76,6 +98,9 @@ func NewSileroVAD(modelPath string) (*SileroVAD, error) {
 
 	v := &SileroVAD{
 		session:        session,
+		v5:             v5,
+		state:          make([]float32, 2*128),
+		context:        make([]float32, sileroContext),
 		hData:          make([]float32, sileroStateSize),
 		cData:          make([]float32, sileroStateSize),
 		enterThreshold: 0.5,
@@ -121,6 +146,8 @@ func (v *SileroVAD) Reset() {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
+	clear(v.state)
+	clear(v.context)
 	for i := range v.hData {
 		v.hData[i] = 0
 	}
@@ -146,6 +173,9 @@ func (v *SileroVAD) Close() error {
 // inferChunk runs a single Silero inference on a 512-sample chunk.
 // Returns the speech probability [0, 1].
 func (v *SileroVAD) inferChunk(pcm []int16) float32 {
+	if v.v5 {
+		return v.inferChunkV5(pcm)
+	}
 	// Convert int16 → float32.
 	audioData := make([]float32, sileroChunkSize)
 	for i, s := range pcm {
@@ -227,4 +257,79 @@ func (v *SileroVAD) applyHysteresis(prob float32) bool {
 		v.triggered = false
 	}
 	return v.triggered
+}
+
+// inferChunkV5 runs the v5 model: input is the previous 64 samples followed by
+// the 512-sample chunk, state is one [2,1,128] tensor.
+func (v *SileroVAD) inferChunkV5(pcm []int16) float32 {
+	in := make([]float32, sileroContext+sileroChunkSize)
+	copy(in, v.context)
+	for i, s := range pcm {
+		in[sileroContext+i] = float32(s) / 32768.0
+	}
+	copy(v.context, in[len(in)-sileroContext:])
+
+	inputTensor, err := ort.NewTensor(ort.NewShape(1, int64(len(in))), in)
+	if err != nil {
+		log.Printf("[silero-vad] input tensor error: %v", err)
+		return 0
+	}
+	defer inputTensor.Destroy()
+	stateTensor, err := ort.NewTensor(ort.NewShape(2, 1, 128), v.state)
+	if err != nil {
+		log.Printf("[silero-vad] state tensor error: %v", err)
+		return 0
+	}
+	defer stateTensor.Destroy()
+	srTensor, err := ort.NewScalar(int64(WhisperSampleRate))
+	if err != nil {
+		log.Printf("[silero-vad] sr tensor error: %v", err)
+		return 0
+	}
+	defer srTensor.Destroy()
+
+	outputs := []ort.Value{nil, nil}
+	if err := v.session.Run([]ort.Value{inputTensor, stateTensor, srTensor}, outputs); err != nil {
+		log.Printf("[silero-vad] inference error: %v", err)
+		return 0
+	}
+	var prob float32
+	if t, ok := outputs[0].(*ort.Tensor[float32]); ok && len(t.GetData()) > 0 {
+		prob = t.GetData()[0]
+	}
+	outputs[0].Destroy()
+	if t, ok := outputs[1].(*ort.Tensor[float32]); ok {
+		copy(v.state, t.GetData())
+	}
+	outputs[1].Destroy()
+	return prob
+}
+
+// OpenVAD returns the best available voice activity detector: Silero when its
+// model is present (it copes with quiet speakers and background noise), the
+// energy VAD otherwise. The returned func releases it.
+func OpenVAD() (core.VADProvider, func()) {
+	for _, p := range sileroCandidates() {
+		if _, err := os.Stat(p); err != nil {
+			continue
+		}
+		if v, err := NewSileroVAD(p); err == nil {
+			return v, func() { _ = v.Close() }
+		} else {
+			log.Printf("[vad] silero unavailable (%v); using the energy detector", err)
+		}
+		break
+	}
+	return DefaultVAD(), func() {}
+}
+
+func sileroCandidates() []string {
+	var c []string
+	if p := os.Getenv("GLEANN_SILERO_VAD"); p != "" {
+		c = append(c, p)
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		c = append(c, filepath.Join(home, ".gleann", "models", "silero_vad.onnx"))
+	}
+	return c
 }

@@ -11,7 +11,7 @@ NC='\033[0m' # No Color
 echo -e "${CYAN}=== GLEANN SOUND AUTOMATED BENCHMARK MANAGER ===${NC}"
 
 # 1. Detect and set workspaces
-SOUND_DIR="/home/tevfik/WORKSPACE/gleann-plugin/gleann-sound"
+SOUND_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NEMOTRON_SANDBOX_DIR="/home/tevfik/WORKSPACE/nemotron-onnx-go"
 
 # 2. Build the latest gleann-plugin-sound binary with ONNX support

@@ -8,6 +8,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/gen2brain/malgo v0.11.22
 	github.com/go-vgo/robotgo v0.110.5
+	github.com/gorilla/websocket v1.5.3
 	github.com/spf13/cobra v1.9.1
 	github.com/yalue/onnxruntime_go v1.26.0
 	golang.design/x/hotkey v0.4.1

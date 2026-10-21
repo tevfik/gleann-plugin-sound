@@ -17,7 +17,12 @@ WHISPER_DIR ?= $(HOME)/whisper.cpp
 CGO_CFLAGS  := -I$(WHISPER_DIR)/include -I$(WHISPER_DIR)/ggml/include
 CGO_LDFLAGS := -L$(WHISPER_DIR)/build/src -L$(WHISPER_DIR)/build/ggml/src -lwhisper -lggml -lggml-cpu -lggml-base -lm -lstdc++ -lpthread -lgomp
 
-.PHONY: all build build-onnx build-all build-stub clean test lint run-dictate run-dictate-nemotron whisper-setup whisper-model onnx-model silero-model install setup-input release
+.PHONY: asr-helper all build build-onnx build-all build-stub clean test lint run-dictate run-dictate-nemotron whisper-setup whisper-model onnx-model silero-model install setup-input release
+
+# ─── Sidecar for the "tc" backend and the Qwen3-ASR refiner ──────────
+# Builds transcribe.cpp and the helper; see native/asr-helper/build.sh.
+asr-helper:
+	native/asr-helper/build.sh $(HOME)/.local/bin
 
 # ─── Default ──────────────────────────────────────────────────────────
 .PHONY: all build
