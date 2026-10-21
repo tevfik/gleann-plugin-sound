@@ -325,3 +325,89 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: false
+
+  # ── whisper.cpp + ONNX Runtime build (Linux amd64) ──
+  # The flavour `make build-all` produces and `gleann-plugin-sound update`
+  # installs for it (update never swaps a build for another flavour).
+  release-whisper-onnx:
+    name: Whisper + ONNX (linux-amd64)
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxtst-dev libxinerama-dev cmake build-essential
+
+      - name: Install ONNX Runtime
+        run: |
+          ORT_VERSION="1.22.0"
+          curl -sSL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz" \
+            | sudo tar xz -C /usr/local --strip-components=1
+          sudo ldconfig
+
+      - name: Build whisper.cpp (CPU-only)
+        run: |
+          WHISPER_DIR="$HOME/whisper.cpp"
+          git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git "$WHISPER_DIR"
+          cmake -S "$WHISPER_DIR" -B "$WHISPER_DIR/build" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$WHISPER_DIR/dist" \
+            -DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DGGML_SYCL=OFF \
+            -DWHISPER_BUILD_EXAMPLES=OFF -DWHISPER_BUILD_TESTS=OFF \
+            -DBUILD_SHARED_LIBS=OFF
+          cmake --build "$WHISPER_DIR/build" --config Release --parallel 2
+          cmake --install "$WHISPER_DIR/build" --config Release
+
+      - name: Determine version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+      - name: Build gleann-plugin-sound (whisper + onnx)
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          WHISPER_DIR="$HOME/whisper.cpp"
+          BINARY="gleann-plugin-sound-whisper-onnx-${{ steps.version.outputs.version }}-linux-amd64"
+          LDFLAGS="-s -w -X main.version=${{ steps.version.outputs.version }}"
+          CGO_CFLAGS="-I$WHISPER_DIR/dist/include" \
+          CGO_LDFLAGS="-L$WHISPER_DIR/dist/lib -lwhisper -lggml -lggml-cpu -lggml-base -lm -lstdc++ -lpthread -lgomp" \
+          go build -trimpath -tags "whisper,onnx" -ldflags "$LDFLAGS" -o "$BINARY" ./cmd/gleann-plugin-sound/
+
+      - name: Compress binary
+        run: |
+          mkdir -p dist
+          tar czf "dist/gleann-plugin-sound-whisper-onnx-${{ steps.version.outputs.version }}-linux-amd64.tar.gz" \
+            gleann-plugin-sound-whisper-onnx-${{ steps.version.outputs.version }}-linux-amd64
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: false
+
+  # ── checksums.txt: lets `update` verify what it downloads ──
+  checksums:
+    name: Publish checksums.txt
+    needs: [release-stub, release-whisper, release-onnx, release-whisper-onnx]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checksum every published archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          mkdir assets && cd assets
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.tar.gz' --pattern '*.zip'
+          sha256sum * > checksums.txt
+          cat checksums.txt
+          gh release upload "$TAG" checksums.txt --repo "$GITHUB_REPOSITORY" --clobber
