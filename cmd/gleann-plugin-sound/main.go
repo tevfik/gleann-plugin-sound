@@ -35,6 +35,11 @@ import (
 var version = "dev"
 
 func main() {
+	// gleann's plugin installer registers a freshly downloaded plugin with
+	// `<binary> --install`; here that is the `install` command.
+	if len(os.Args) > 1 && os.Args[1] == "--install" {
+		os.Args[1] = "install"
+	}
 	if version != "dev" {
 		httpserver.PluginVersion = strings.TrimPrefix(version, "v")
 	}
