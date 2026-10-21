@@ -6,6 +6,9 @@
 # TRANSCRIBE_SRC may point at a transcribe.cpp checkout or unpacked sdist;
 # otherwise the sdist is fetched from PyPI (transcribe-cpp-native), which avoids
 # cloning the large git history. Needs cmake, a C/C++ compiler and libopenblas-dev.
+# Works on x86_64 and aarch64 Linux. Set GGML_NATIVE=OFF for a build that runs on
+# other CPUs than the one it was built on (what the release workflow does);
+# CMAKE_EXTRA adds further cmake flags.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 dest="${1:-$HOME/.local/bin}"
@@ -22,7 +25,7 @@ if [ ! -f "$src/include/transcribe.h" ]; then
 fi
 
 echo "==> building transcribe.cpp (CPU, native)"
-cmake -S "$src" -B "$src/build" -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=ON >/dev/null
+cmake -S "$src" -B "$src/build" -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE="${GGML_NATIVE:-ON}" ${CMAKE_EXTRA:-} >/dev/null
 cmake --build "$src/build" -j"$(nproc)" --target transcribe >/dev/null
 
 echo "==> linking gleann-asr-helper"

@@ -45,6 +45,13 @@ jobs:
             ext: ""
             archive: tar.gz
             generate_notes: true
+          - runner: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+            os-label: linux-arm64
+            ext: ""
+            archive: tar.gz
+            generate_notes: false
           - runner: macos-latest
             goos: darwin
             goarch: arm64
@@ -127,6 +134,13 @@ jobs:
             ext: ""
             archive: tar.gz
             cmake-extra: ""
+          - runner: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+            os-label: linux-arm64
+            ext: ""
+            archive: tar.gz
+            cmake-extra: "-DGGML_NATIVE=OFF"
           - runner: macos-latest
             goos: darwin
             goarch: arm64
@@ -274,11 +288,21 @@ jobs:
           files: dist/*
           generate_release_notes: false
 
-  # ── ONNX Runtime build (Linux amd64 only) ──
+  # ── ONNX Runtime build (Linux amd64 + arm64) ──
   release-onnx:
-    name: ONNX (linux-amd64)
+    name: ONNX (linux-${{ matrix.arch }})
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+            ort-arch: x64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            ort-arch: aarch64
 
     steps:
       - uses: actions/checkout@v4
@@ -296,7 +320,7 @@ jobs:
       - name: Install ONNX Runtime
         run: |
           ORT_VERSION="1.22.0"
-          curl -sSL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz" \
+          curl -sSL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-${{ matrix.ort-arch }}-${ORT_VERSION}.tgz" \
             | sudo tar xz -C /usr/local --strip-components=1
           sudo ldconfig
 
@@ -307,18 +331,18 @@ jobs:
       - name: Build gleann-plugin-sound (onnx)
         env:
           GOOS: linux
-          GOARCH: amd64
+          GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: "1"
         run: |
-          BINARY="gleann-plugin-sound-onnx-${{ steps.version.outputs.version }}-linux-amd64"
+          BINARY="gleann-plugin-sound-onnx-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}"
           LDFLAGS="-s -w -X main.version=${{ steps.version.outputs.version }}"
           go build -trimpath -tags onnx -ldflags "$LDFLAGS" -o "$BINARY" ./cmd/gleann-plugin-sound/
 
       - name: Compress binary
         run: |
           mkdir -p dist
-          tar czf "dist/gleann-plugin-sound-onnx-${{ steps.version.outputs.version }}-linux-amd64.tar.gz" \
-            gleann-plugin-sound-onnx-${{ steps.version.outputs.version }}-linux-amd64
+          tar czf "dist/gleann-plugin-sound-onnx-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}.tar.gz" \
+            gleann-plugin-sound-onnx-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
@@ -326,13 +350,23 @@ jobs:
           files: dist/*
           generate_release_notes: false
 
-  # ── whisper.cpp + ONNX Runtime build (Linux amd64) ──
+  # ── whisper.cpp + ONNX Runtime build (Linux amd64 + arm64) ──
   # The flavour `make build-all` produces and `gleann-plugin-sound update`
   # installs for it (update never swaps a build for another flavour).
   release-whisper-onnx:
-    name: Whisper + ONNX (linux-amd64)
+    name: Whisper + ONNX (linux-${{ matrix.arch }})
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+            ort-arch: x64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            ort-arch: aarch64
 
     steps:
       - uses: actions/checkout@v4
@@ -350,7 +384,7 @@ jobs:
       - name: Install ONNX Runtime
         run: |
           ORT_VERSION="1.22.0"
-          curl -sSL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz" \
+          curl -sSL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-${{ matrix.ort-arch }}-${ORT_VERSION}.tgz" \
             | sudo tar xz -C /usr/local --strip-components=1
           sudo ldconfig
 
@@ -363,7 +397,8 @@ jobs:
             -DCMAKE_INSTALL_PREFIX="$WHISPER_DIR/dist" \
             -DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DGGML_SYCL=OFF \
             -DWHISPER_BUILD_EXAMPLES=OFF -DWHISPER_BUILD_TESTS=OFF \
-            -DBUILD_SHARED_LIBS=OFF
+            -DBUILD_SHARED_LIBS=OFF \
+            $([ "${{ matrix.arch }}" = arm64 ] && echo -DGGML_NATIVE=OFF)
           cmake --build "$WHISPER_DIR/build" --config Release --parallel 2
           cmake --install "$WHISPER_DIR/build" --config Release
 
@@ -376,7 +411,7 @@ jobs:
           CGO_ENABLED: "1"
         run: |
           WHISPER_DIR="$HOME/whisper.cpp"
-          BINARY="gleann-plugin-sound-whisper-onnx-${{ steps.version.outputs.version }}-linux-amd64"
+          BINARY="gleann-plugin-sound-whisper-onnx-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}"
           LDFLAGS="-s -w -X main.version=${{ steps.version.outputs.version }}"
           CGO_CFLAGS="-I$WHISPER_DIR/dist/include" \
           CGO_LDFLAGS="-L$WHISPER_DIR/dist/lib -lwhisper -lggml -lggml-cpu -lggml-base -lm -lstdc++ -lpthread -lgomp" \
@@ -385,8 +420,57 @@ jobs:
       - name: Compress binary
         run: |
           mkdir -p dist
-          tar czf "dist/gleann-plugin-sound-whisper-onnx-${{ steps.version.outputs.version }}-linux-amd64.tar.gz" \
-            gleann-plugin-sound-whisper-onnx-${{ steps.version.outputs.version }}-linux-amd64
+          tar czf "dist/gleann-plugin-sound-whisper-onnx-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}.tar.gz" \
+            gleann-plugin-sound-whisper-onnx-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: false
+
+  # ── gleann-asr-helper: the sidecar behind the "tc" backend (transcribe.cpp) ──
+  # Built natively on each architecture; GGML_NATIVE=OFF keeps the binary
+  # runnable on CPUs other than the build runner's.
+  release-asr-helper:
+    name: ASR helper (linux-${{ matrix.arch }})
+    needs: test
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+            cmake-extra: "-DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_AVX512=OFF"
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            cmake-extra: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential libopenblas-dev python3-pip
+
+      - name: Determine version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+      - name: Build gleann-asr-helper
+        env:
+          GGML_NATIVE: "OFF"
+          CMAKE_EXTRA: ${{ matrix.cmake-extra }}
+        run: |
+          mkdir -p out
+          native/asr-helper/build.sh "$PWD/out"
+          file out/gleann-asr-helper
+
+      - name: Compress binary
+        run: |
+          mkdir -p dist
+          tar czf "dist/gleann-asr-helper-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}.tar.gz" -C out gleann-asr-helper
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
@@ -397,7 +481,7 @@ jobs:
   # ── checksums.txt: lets `update` verify what it downloads ──
   checksums:
     name: Publish checksums.txt
-    needs: [release-stub, release-whisper, release-onnx, release-whisper-onnx]
+    needs: [release-stub, release-whisper, release-onnx, release-whisper-onnx, release-asr-helper]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:

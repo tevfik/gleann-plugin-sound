@@ -53,8 +53,8 @@ func release(t *testing.T, flavor, content, sumOverride string) {
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
-	tw.WriteHeader(&tar.Header{Name: strings.TrimSuffix(asset, ".tar.gz"), Mode: 0o755, Size: int64(len(content)), Typeflag: tar.TypeReg})
-	tw.Write([]byte(content))
+	_ = tw.WriteHeader(&tar.Header{Name: strings.TrimSuffix(asset, ".tar.gz"), Mode: 0o755, Size: int64(len(content)), Typeflag: tar.TypeReg})
+	_, _ = tw.Write([]byte(content))
 	tw.Close()
 	gz.Close()
 	sum := sha256.Sum256(buf.Bytes())
@@ -69,7 +69,7 @@ func release(t *testing.T, flavor, content, sumOverride string) {
 		fmt.Fprintf(w, `{"tag_name":"v1.4.0","assets":[{"name":%q,"browser_download_url":%q},{"name":"checksums.txt","browser_download_url":%q}]}`,
 			asset, srv.URL+"/a", srv.URL+"/c")
 	})
-	mux.HandleFunc("/a", func(w http.ResponseWriter, r *http.Request) { w.Write(buf.Bytes()) })
+	mux.HandleFunc("/a", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(buf.Bytes()) })
 	mux.HandleFunc("/c", func(w http.ResponseWriter, r *http.Request) { fmt.Fprintf(w, "%s  %s\n", hash, asset) })
 	t.Setenv("GLEANN_GITHUB_API", srv.URL)
 }
@@ -77,7 +77,7 @@ func release(t *testing.T, flavor, content, sumOverride string) {
 func TestInstallReplacesBinaryAfterChecksum(t *testing.T) {
 	release(t, "whisper-onnx", "NEW", "")
 	dest := filepath.Join(t.TempDir(), bin)
-	os.WriteFile(dest, []byte("OLD"), 0o755)
+	_ = os.WriteFile(dest, []byte("OLD"), 0o755)
 	rel, err := Latest(context.Background(), "tevfik", bin)
 	if err != nil || rel.Tag != "v1.4.0" {
 		t.Fatalf("latest: %v %v", rel, err)
@@ -94,7 +94,7 @@ func TestInstallReplacesBinaryAfterChecksum(t *testing.T) {
 func TestInstallNeverSwapsFlavour(t *testing.T) {
 	release(t, "onnx", "NEW", "") // only a plain onnx build is published
 	dest := filepath.Join(t.TempDir(), bin)
-	os.WriteFile(dest, []byte("OLD"), 0o755)
+	_ = os.WriteFile(dest, []byte("OLD"), 0o755)
 	rel, _ := Latest(context.Background(), "tevfik", bin)
 	if _, err := Install(context.Background(), rel, bin, "whisper-onnx", dest); err == nil || !strings.Contains(err.Error(), "whisper-onnx") {
 		t.Fatalf("err = %v", err)
@@ -108,7 +108,7 @@ func TestInstallKeepsOldBinaryOnChecksumMismatch(t *testing.T) {
 	release(t, "whisper", "NEW", strings.Repeat("0", 64))
 	dir := t.TempDir()
 	dest := filepath.Join(dir, bin)
-	os.WriteFile(dest, []byte("OLD"), 0o755)
+	_ = os.WriteFile(dest, []byte("OLD"), 0o755)
 	rel, _ := Latest(context.Background(), "tevfik", bin)
 	if _, err := Install(context.Background(), rel, bin, "whisper", dest); err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
 		t.Fatalf("err = %v", err)

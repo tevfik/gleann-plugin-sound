@@ -163,6 +163,26 @@ foreground command refuses to start while the daemon is running): stop the daemo
 first with `gleann-plugin-sound daemon remove` or
 `systemctl --user stop gleann-plugin-sound-dictate`.
 
+## Linux arm64 (Raspberry Pi, AWS Graviton, Apple Silicon VMs)
+
+The plugin runs natively on `linux/arm64`; releases ship `linux-arm64` archives for every
+flavour (stub, whisper, onnx, whisper-onnx) and for `gleann-asr-helper`. Nothing is
+x86-specific: ONNX Runtime is fetched as `onnxruntime-linux-aarch64`, and ggml uses NEON.
+
+What the target machine needs:
+
+| Component | Package / source |
+|---|---|
+| Microphone capture | ALSA or PulseAudio runtime (`libasound2`, `libpulse0`) |
+| Typing into other apps (dictation) | X11 only: `libx11-6 libxtst6 libxinerama1` (Wayland: transcription and the HTTP server work, key injection does not) |
+| `tc` backend (best live accuracy) | `gleann-asr-helper-<tag>-linux-arm64.tar.gz` from the release, next to the plugin or in `~/.local/bin`; needs `libopenblas0` |
+| `onnx` / `nemotron` backends | nothing: ONNX Runtime is downloaded on first use |
+| File decoding | `ffmpeg` |
+
+To build on arm64 yourself, run the same commands as on x86 (`make build-all`,
+`native/asr-helper/build.sh`); add `GGML_NATIVE=OFF` to the helper build if the binary must run
+on other CPUs than the build machine.
+
 ## Execution Modes
 
 | Mode | Command | Description |

@@ -38,7 +38,7 @@ func upload(t *testing.T, url string) *http.Response {
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
 	fw, _ := mw.CreateFormFile("file", "meeting.mp3")
-	fw.Write([]byte("not really audio; the fake engine ignores it"))
+	_, _ = fw.Write([]byte("not really audio; the fake engine ignores it"))
 	mw.Close()
 	resp, err := http.Post(url+"/convert", mw.FormDataContentType(), &body)
 	if err != nil {
@@ -60,7 +60,7 @@ func TestCapabilitiesMatchGleannRouting(t *testing.T) {
 			SchemaVersion int      `json:"schema_version"`
 			Version       string   `json:"version"`
 		}
-		json.NewDecoder(resp.Body).Decode(&got)
+		_ = json.NewDecoder(resp.Body).Decode(&got)
 		resp.Body.Close()
 		has := map[string]bool{}
 		for _, c := range got.Capabilities {
@@ -94,7 +94,7 @@ func TestConvert(t *testing.T) {
 			Text       string
 		} `json:"segments"`
 	}
-	json.NewDecoder(resp.Body).Decode(&got)
+	_ = json.NewDecoder(resp.Body).Decode(&got)
 	if got.Text != "Merhaba Gleann eklenti çalışıyor" {
 		t.Errorf("text = %q (corrections must apply)", got.Text)
 	}

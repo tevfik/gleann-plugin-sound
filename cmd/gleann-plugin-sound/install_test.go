@@ -13,7 +13,7 @@ func TestInstallPreservesOtherPlugins(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	dir := filepath.Join(home, ".gleann")
-	os.MkdirAll(dir, 0o755)
+	_ = os.MkdirAll(dir, 0o755)
 	existing := `{"plugins":[
 	 {"name":"gleann-plugin-docs","url":"http://localhost:8765","command":["docs"],
 	  "capabilities":["document-extraction"],"extensions":[".pdf"],

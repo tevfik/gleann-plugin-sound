@@ -102,16 +102,16 @@ func TestLiveSession(t *testing.T) {
 
 	// 2 s of speech, then 1.2 s of silence ends the utterance, then "end".
 	for i := 0; i < 2000; i += 100 {
-		c.WriteMessage(websocket.BinaryMessage, tonePCM(100))
+		_ = c.WriteMessage(websocket.BinaryMessage, tonePCM(100))
 	}
 	for i := 0; i < 1200; i += 100 {
-		c.WriteMessage(websocket.BinaryMessage, make([]byte, 100*16*2))
+		_ = c.WriteMessage(websocket.BinaryMessage, make([]byte, 100*16*2))
 	}
-	c.WriteJSON(liveMsg{Type: "end"})
+	_ = c.WriteJSON(liveMsg{Type: "end"})
 
 	var partials, finals int
 	var final liveMsg
-	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
 	for {
 		var m liveMsg
 		if err := c.ReadJSON(&m); err != nil {
@@ -159,7 +159,7 @@ func TestLiveCapacity(t *testing.T) {
 	}
 	defer c1.Close()
 	var m liveMsg
-	c1.ReadJSON(&m) // session 1 is established and holds the slot
+	_ = c1.ReadJSON(&m) // session 1 is established and holds the slot
 	if _, resp, err := dial(t, ts, ""); err == nil || resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("second session must get 503, got %v %v", resp, err)
 	}

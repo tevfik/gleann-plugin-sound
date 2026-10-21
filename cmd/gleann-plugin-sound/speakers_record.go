@@ -88,7 +88,7 @@ func recordMic(ctx context.Context, d time.Duration) ([]int16, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot start the microphone: %w", err)
 	}
-	defer capturer.Stop()
+	defer func() { _ = capturer.Stop() }()
 
 	start := time.Now()
 	tick := time.NewTicker(100 * time.Millisecond)

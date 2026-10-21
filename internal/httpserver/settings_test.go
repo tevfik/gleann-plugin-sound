@@ -65,7 +65,7 @@ func TestSettingsGetDescribesFormWithCurrentValues(t *testing.T) {
 			Options   []settingOption
 		}
 	}
-	json.NewDecoder(resp.Body).Decode(&got)
+	_ = json.NewDecoder(resp.Body).Decode(&got)
 	if got.SchemaVersion != SettingsSchemaVersion {
 		t.Errorf("schema_version = %d", got.SchemaVersion)
 	}

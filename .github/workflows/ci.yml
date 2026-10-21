@@ -69,6 +69,39 @@ jobs:
           name: coverage
           path: coverage.out
 
+  # ── Linux arm64: tests and every build flavour on native arm64 ──
+  test-arm64:
+    name: Test (linux-arm64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxtst-dev libxinerama-dev
+
+      - name: Test
+        run: go test -count=1 -timeout 120s ./...
+
+      - name: Build (stub)
+        run: go build -o /dev/null ./cmd/gleann-plugin-sound/
+
+      - name: Build (onnx)
+        run: CGO_ENABLED=1 go build -tags onnx -o /dev/null ./cmd/gleann-plugin-sound/
+
+      - name: Build and smoke-test gleann-asr-helper
+        run: |
+          sudo apt-get install -y cmake build-essential libopenblas-dev python3-pip
+          GGML_NATIVE=OFF native/asr-helper/build.sh "$PWD/out"
+          file out/gleann-asr-helper
+          out/gleann-asr-helper 2>&1 | head -3 || true
+
   # ── Cross-platform stub build check ──────────────────────────
   build-stub:
     name: Build Stub (${{ matrix.os-label }})
