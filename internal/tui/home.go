@@ -21,6 +21,8 @@ const (
 	ScreenInstall
 	ScreenUninstall
 	ScreenTest
+	ScreenSpeakers
+	ScreenUpdate
 )
 
 type menuItem struct {
@@ -40,9 +42,11 @@ var preSetupMenuItems = []menuItem{
 var postSetupMenuItems = []menuItem{
 	{title: "Dictate", desc: "Push-to-talk voice dictation", icon: "🎙 ", screen: ScreenDictate},
 	{title: "Listen", desc: "Continuous real-time transcription", icon: "👂", screen: ScreenListen},
-	{title: "Serve", desc: "gRPC daemon for gleann integration", icon: "🔌", screen: ScreenServe},
-	{title: "Test", desc: "Diagnose mic, hotkey, whisper & keyboard", icon: "🔬", screen: ScreenTest},
+	{title: "Serve", desc: "Plugin server for gleann (HTTP + live WebSocket)", icon: "🔌", screen: ScreenServe},
+	{title: "Test", desc: "Diagnose mic, hotkey, speech model & keyboard", icon: "🔬", screen: ScreenTest},
+	{title: "Speakers", desc: "Enrol voices (record from the mic) so meetings show names", icon: "🗣 ", screen: ScreenSpeakers},
 	{title: "Setup", desc: "Reconfigure models, language & hotkey", icon: "⚙ ", screen: ScreenSetup},
+	{title: "Update", desc: "Update from the latest GitHub release", icon: "⬆ ", screen: ScreenUpdate},
 	{title: "Install", desc: "Install binary & shell completions system-wide", icon: "📦", screen: ScreenInstall},
 	{title: "Uninstall", desc: "Remove gleann-plugin-sound from system", icon: "🗑 ", screen: ScreenUninstall},
 	{title: "Quit", desc: "Exit", icon: "👋", screen: ScreenHome},
@@ -113,8 +117,8 @@ func (m HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m HomeModel) Chosen() Screen { return m.chosen }
-func (m HomeModel) Quitting() bool { return m.quitting }
+func (m HomeModel) Chosen() Screen         { return m.chosen }
+func (m HomeModel) Quitting() bool         { return m.quitting }
 func (m HomeModel) Config() *config.Config { return m.cfg }
 
 func (m HomeModel) View() string {
@@ -169,9 +173,6 @@ func (m HomeModel) View() string {
 		statusLine += fmt.Sprintf(" │ backend: %s", backendStr)
 		if (backendStr == "onnx" || backendStr == "nemotron") && m.cfg.ExecutionProvider != "" {
 			statusLine += fmt.Sprintf(" (%s)", m.cfg.ExecutionProvider)
-		}
-		if m.cfg.GRPCAddr != "" {
-			statusLine += fmt.Sprintf(" │ gRPC: %s", m.cfg.GRPCAddr)
 		}
 		b.WriteString(lipgloss.NewStyle().Foreground(ColorDimFg).Render(statusLine))
 		b.WriteString("\n")

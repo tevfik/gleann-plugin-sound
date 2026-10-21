@@ -2,23 +2,32 @@
 //
 // gleann-plugin-sound is a companion daemon/plugin for the gleann vector database
 // that handles heavy audio processing, CGO integrations, and OS-level hooks.
-// It supports four execution modes:
+// It runs entirely locally and supports these execution modes:
 //
-//  1. transcribe — On-demand file transcription
-//  2. listen     — Live CLI streaming transcription
-//  3. dictate    — Push-to-talk voice dictation with keystroke injection
+//  1. transcribe   — On-demand file transcription
+//  2. listen       — Live CLI streaming transcription
+//  3. dictate      — Push-to-talk voice dictation with keystroke injection
+//  4. plugin-serve — HTTP server for gleann (/convert) plus a live WebSocket (/live)
+//
+// plus helpers: speakers, daemon, install, devices, test, benchmark, evaluate,
+// live-client and the interactive tui.
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/tevfik/gleann-plugin-sound/internal/config"
+	"github.com/tevfik/gleann-plugin-sound/internal/httpserver"
+	"github.com/tevfik/gleann-plugin-sound/internal/tui"
 
 	// Register backends — import for side-effect init().
 	_ "github.com/tevfik/gleann-plugin-sound/internal/nemotron"
 	_ "github.com/tevfik/gleann-plugin-sound/internal/onnx"
+	_ "github.com/tevfik/gleann-plugin-sound/internal/tcasr"
 	_ "github.com/tevfik/gleann-plugin-sound/internal/whisper"
 )
 
@@ -26,17 +35,36 @@ import (
 var version = "dev"
 
 func main() {
+	if version != "dev" {
+		httpserver.PluginVersion = strings.TrimPrefix(version, "v")
+	}
 	root := &cobra.Command{
 		Use:   "gleann-plugin-sound",
 		Short: "Audio processing companion for the gleann RAG engine",
-		Long: `gleann-plugin-sound captures audio, runs local Whisper inference, and
-delivers transcriptions — either as CLI output or as injected keystrokes
-for voice dictation.
+		Long: `gleann-plugin-sound captures audio, runs local speech recognition, and
+delivers transcriptions as CLI output, as injected keystrokes (voice
+dictation), or over HTTP/WebSocket to gleann and other clients.
 
-All audio is processed locally using whisper.cpp — no cloud APIs required.
+All audio is processed locally — no cloud APIs required. Backends:
+  whisper    whisper.cpp (GGML models, CPU)
+  onnx       Whisper on ONNX Runtime (CPU/GPU)
+  nemotron   Nemotron 3.5 streaming, int4 ONNX (real time)
+  tc         Nemotron 3.5 streaming, GGUF Q8 via the gleann-asr-helper
+             sidecar (real time, most accurate live backend)
 
-Run 'gleann-plugin-sound tui' for interactive setup and configuration.`,
+Settings are read from ~/.gleann/sound.json; flags override them.
+
+Common tasks:
+  gleann-plugin-sound tui                        interactive setup
+  gleann-plugin-sound dictate                    push-to-talk typing
+  gleann-plugin-sound listen --language tr       live transcription
+  gleann-plugin-sound plugin-serve               server for gleann and /live clients
+  gleann-plugin-sound speakers record NAME      record your voice to name speakers
+  gleann-plugin-sound update                    update from the latest release`,
 		Version: version,
+		// Runtime failures are not usage mistakes, and main prints the error once.
+		SilenceUsage:  true,
+		SilenceErrors: true,
 	}
 
 	// Load saved config for defaults (fall back to hardcoded defaults if absent).
@@ -61,11 +89,11 @@ Run 'gleann-plugin-sound tui' for interactive setup and configuration.`,
 
 	// Persistent flags shared by all subcommands.
 	root.PersistentFlags().String("model", defaultModel,
-		"Path to the Whisper GGML model file")
+		"Path to the model: a Whisper GGML file (whisper), an ONNX model directory (onnx, nemotron) or a GGUF file (tc)")
 	root.PersistentFlags().String("backend", defaultBackend,
-		"Transcription backend: whisper (default), onnx or nemotron")
+		"Transcription backend: whisper, onnx, nemotron or tc (default: backend in sound.json, else whisper)")
 	root.PersistentFlags().String("provider", defaultProvider,
-		"ONNX execution provider: auto (default), cuda, cpu")
+		"ONNX execution provider for onnx and nemotron: auto (CUDA when available), cuda, cpu")
 	root.PersistentFlags().Bool("verbose", false,
 		"Enable verbose / debug logging")
 
@@ -76,6 +104,24 @@ Run 'gleann-plugin-sound tui' for interactive setup and configuration.`,
 			// Import is already done via init(); set the provider for ONNX engine.
 			setONNXProvider(provider)
 		}
+	}
+
+	// Shell completions installed by the TUI come from cobra, so they always
+	// match the real command tree.
+	tui.CompletionScript = func(shell string) (string, error) {
+		var buf bytes.Buffer
+		var err error
+		switch shell {
+		case "bash":
+			err = root.GenBashCompletionV2(&buf, true)
+		case "zsh":
+			err = root.GenZshCompletion(&buf)
+		case "fish":
+			err = root.GenFishCompletion(&buf, true)
+		default:
+			err = fmt.Errorf("unsupported shell %q", shell)
+		}
+		return buf.String(), err
 	}
 
 	// Register execution modes, TUI, and plugin integration.
@@ -90,7 +136,11 @@ Run 'gleann-plugin-sound tui' for interactive setup and configuration.`,
 		newDevicesCmd(),
 		newPluginServeCmd(),
 		newInstallPluginCmd(),
+		newDaemonCmd(),
+		newSpeakersCmd(),
+		newLiveClientCmd(),
 		newVersionCmd(),
+		newUpdateCmd(),
 	)
 
 	if err := root.Execute(); err != nil {

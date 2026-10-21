@@ -12,8 +12,10 @@ func newTUICmd() *cobra.Command {
 		Long: `Launch the interactive terminal UI for gleann-plugin-sound.
 
 The TUI provides:
-  • Setup wizard — select and download Whisper models, configure
-    default language, hotkey, and save settings
+  • Setup wizard — select and download models, choose the backend
+    (whisper, onnx, nemotron, tc), default language, hotkey, audio source
+  • Dictate, Listen, Serve (plugin-serve) and Test — launch those commands
+    with your saved settings
   • Install — copy binary to PATH, install shell completions,
     setup input device permissions
   • Uninstall — remove binary, completions, config, and models`,

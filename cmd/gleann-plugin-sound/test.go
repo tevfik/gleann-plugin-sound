@@ -28,7 +28,7 @@ func newTestCmd() *cobra.Command {
 
   1. Microphone capture is working (records 3 seconds, shows audio level)
   2. Hotkey detection works (waits for a key press/release event)
-  3. Whisper transcription works (transcribes a short recording)
+  3. Speech recognition works (transcribes a short recording with the chosen backend)
   4. Keyboard injection works (types a test string into stdout)
 
 Uses the config from ~/.gleann/sound.json or CLI flags.`,
@@ -259,14 +259,14 @@ func testTranscriptionBackend(backend, modelPath, lang string, pcm []int16) bool
 
 		text = strings.TrimSpace(text)
 		if text == "" || text == "[BLANK_AUDIO]" || text == "(inaudible)" {
-			fmt.Printf("  ✓ Whisper returned empty/blank (silence detected) in %v\n", elapsed)
+			fmt.Printf("  ✓ Recogniser returned empty/blank (silence detected) in %v\n", elapsed)
 			fmt.Println("  ⚠  Try speaking louder during the microphone test")
 		} else {
 			fmt.Printf("  ✓ Transcribed in %v: %q\n", elapsed, text)
 		}
 	} else {
 		fmt.Println("  ⚠  No audio to transcribe (microphone test failed)")
-		fmt.Println("  ✓ Model loads correctly — whisper engine OK")
+		fmt.Println("  ✓ Model loads correctly — engine OK")
 	}
 
 	return true

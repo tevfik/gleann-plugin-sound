@@ -8,21 +8,26 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/tevfik/gleann-plugin-sound/internal/config"
+	"github.com/tevfik/gleann-plugin-sound/internal/httpserver"
 )
 
 // Supported audio/video extensions for document extraction.
-var audioExtensions = []string{
-	".mp3", ".wav", ".m4a", ".flac", ".ogg",
-	".webm", ".mp4", ".mkv", ".avi",
-}
+var audioExtensions = httpserver.SupportedExts
 
 // pluginEntry mirrors the gleann Plugin struct for JSON serialisation.
+// pluginEntry mirrors gleann's registry entry. Every field gleann knows must be
+// listed: install rewrites the whole file, and anything missing here would be
+// stripped from the other plugins' entries.
 type pluginEntry struct {
-	Name         string   `json:"name"`
-	URL          string   `json:"url"`
-	Command      []string `json:"command"`
-	Capabilities []string `json:"capabilities"`
-	Extensions   []string `json:"extensions"`
+	Name          string   `json:"name"`
+	URL           string   `json:"url"`
+	Command       []string `json:"command"`
+	Capabilities  []string `json:"capabilities"`
+	Extensions    []string `json:"extensions"`
+	Timeout       int      `json:"timeout,omitempty"`
+	Version       string   `json:"version,omitempty"`
+	SchemaVersion int      `json:"schema_version,omitempty"`
+	Priority      int      `json:"priority,omitempty"`
 }
 
 type pluginRegistry struct {
@@ -31,12 +36,12 @@ type pluginRegistry struct {
 
 // newInstallPluginCmd creates the "install" subcommand.
 //
-// It registers gleann-plugin-sound as a document-extraction plugin in ~/.gleann/plugins.json
+// It registers gleann-plugin-sound as an audio-transcription plugin in ~/.gleann/plugins.json
 // so that gleann's PluginManager can auto-start and route audio files to it.
 //
 // Usage:
 //
-//	gleann-plugin-sound install [--port 8766]
+//	gleann-plugin-sound install [--port 8767]
 func newInstallPluginCmd() *cobra.Command {
 	var port int
 
@@ -54,7 +59,7 @@ for gleann-plugin-sound exists, it is replaced.`,
 		},
 	}
 
-	cmd.Flags().IntVar(&port, "port", 8766, "HTTP port for the plugin server")
+	cmd.Flags().IntVar(&port, "port", 8767, "HTTP port for the plugin server")
 
 	return cmd
 }
@@ -83,6 +88,9 @@ func installPlugin(cmd *cobra.Command, port int) error {
 		}
 		if cfg.Language != "" {
 			command = append(command, "--language", cfg.Language)
+		}
+		if cfg.RefineModel != "" {
+			command = append(command, "--refine-model", config.ExpandPath(cfg.RefineModel))
 		}
 	}
 
@@ -125,11 +133,14 @@ func installPlugin(cmd *cobra.Command, port int) error {
 
 	// Add new entry.
 	entry := pluginEntry{
-		Name:         "gleann-plugin-sound",
-		URL:          fmt.Sprintf("http://localhost:%d", port),
-		Command:      command,
-		Capabilities: []string{"document-extraction"},
-		Extensions:   audioExtensions,
+		Name:          "gleann-plugin-sound",
+		URL:           fmt.Sprintf("http://localhost:%d", port),
+		Command:       command,
+		Capabilities:  httpserver.Capabilities,
+		Extensions:    audioExtensions,
+		Version:       httpserver.PluginVersion,
+		SchemaVersion: httpserver.SchemaVersion,
+		Timeout:       1800,
 	}
 	registry.Plugins = append(registry.Plugins, entry)
 

@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -21,34 +23,53 @@ import (
 	"github.com/tevfik/gleann-plugin-sound/internal/hotkey"
 	"github.com/tevfik/gleann-plugin-sound/internal/keyboard"
 	"github.com/tevfik/gleann-plugin-sound/internal/pipeline"
+	"github.com/tevfik/gleann-plugin-sound/internal/tcasr"
 )
 
 // newDictateCmd creates the "dictate" subcommand (Mode 4: Voice Dictation).
 //
 // Usage:
 //
-//	gleann-plugin-sound dictate --key "ctrl+alt+space" --model models/ggml-base.en.bin
+//	gleann-plugin-sound dictate --key "ctrl+shift+space" --language tr
 //
 // Registers a global hotkey.  While the key is held, audio is captured from
-// the default mic.  On release, the audio is transcribed via Whisper and the
-// resulting text is injected as simulated keystrokes into the active window.
+// the default mic and the recognised words are typed into the active window
+// (streaming backends type as you speak; others transcribe on release).
 func newDictateCmd() *cobra.Command {
 	var hotkeyStr string
+	var refineFlag string
 
 	cmd := &cobra.Command{
-		Use:   "dictate",
-		Short: "Push-to-talk voice dictation with keystroke injection",
-		Long: `Mode 4 — Voice Dictation.
+		Use:          "dictate",
+		Short:        "Push-to-talk voice dictation with keystroke injection",
+		SilenceUsage: true,
+		Long: `Push-to-talk voice dictation.
 
-Registers a global system hotkey (e.g. Ctrl+Alt+Space).  Hold the key and
-speak; release the key to transcribe and inject the text as keystrokes into
-the currently active window.
+Registers a global hotkey. Hold it and speak; the recognised words are typed
+into the focused window as keystrokes. With a streaming backend (tc,
+nemotron) words appear about a second after you say them; with whisper or
+onnx the text is typed in chunks / when you release the key.
 
-This mode requires:
-  - A working microphone accessible via PulseAudio/PipeWire (Linux) or WASAPI (Windows)
-  - Whisper model downloaded locally
-  - X11/Wayland permissions for keystroke injection (Linux) or appropriate
-    accessibility permissions (macOS)
+If a refine model is configured (refine_model in sound.json or --refine-model)
+the streaming backends switch to accurate mode: after each pause the
+utterance is re-checked by Qwen3-ASR and that text is typed instead of the
+live words. It is much more accurate on conversational speech, at the cost of
+text appearing in phrases after you pause. --refine-model=off restores
+word-by-word typing.
+
+Settings (model, backend, language, hotkey) come from ~/.gleann/sound.json,
+written by 'gleann-plugin-sound tui'. Flags override them.
+
+Requirements:
+  - A microphone reachable through PulseAudio/PipeWire (Linux), CoreAudio or WASAPI
+  - A model for the chosen backend (see 'gleann-plugin-sound tui')
+  - Linux: read access to /dev/input (add yourself to the 'input' group and
+    log in again) and an X11 session for keystroke injection (DISPLAY must be set)
+  - macOS: Accessibility permission for the terminal
+
+To run it in the background from login use 'gleann-plugin-sound daemon install'.
+Only one dictation process should run at a time: two of them type every
+word twice.
 
 Press Ctrl+C to exit.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -75,6 +96,12 @@ Press Ctrl+C to exit.`,
 				return fmt.Errorf("no model specified: use --model flag or run TUI setup")
 			}
 
+			releaseLock, lockErr := acquireDictateLock()
+			if lockErr != nil {
+				return lockErr
+			}
+			defer releaseLock()
+
 			log.Println("[dictate] initialising...")
 
 			// ── Parse hotkey string ────────────────────────────────
@@ -99,6 +126,21 @@ Press Ctrl+C to exit.`,
 				log.Printf("[dictate] language set to: %s", lang)
 			} else {
 				log.Println("[dictate] language: auto-detect")
+			}
+
+			// ── Optional refiner: type the accurate transcript, not the live words ──
+			var refiner *tcasr.Refiner
+			if _, isLive := engine.(core.LiveTranscriber); isLive {
+				if rm := resolveRefineModel(refineFlag); rm != "" {
+					log.Printf("[dictate] loading refiner: %s", rm)
+					r, rerr := tcasr.NewRefiner(config.ExpandPath(rm), lang)
+					if rerr != nil {
+						return fmt.Errorf("refiner: %w", rerr)
+					}
+					defer r.Close()
+					refiner = r
+					log.Println("[dictate] accurate mode: text is typed after each pause, once the refiner has checked it")
+				}
 			}
 
 			// ── Initialise audio capturer ──────────────────────────
@@ -145,16 +187,18 @@ Press Ctrl+C to exit.`,
 			log.Println("[dictate] press Ctrl+C to exit")
 
 			// ── Push-to-talk event loop ────────────────────────────
-			return dictateLoop(ctx, hk, capturer, engine, injector, backend)
+			return dictateLoop(ctx, hk, capturer, engine, injector, backend, refiner)
 		},
 	}
 
 	cmd.Flags().StringVar(&hotkeyStr, "key", "ctrl+alt+space",
-		"Global hotkey combination (e.g. ctrl+alt+space, ctrl+shift+d)")
+		"Global hotkey, modifiers + key (e.g. ctrl+shift+space, alt+d, f9). Default: hotkey in sound.json, else ctrl+alt+space")
+	cmd.Flags().StringVar(&refineFlag, "refine-model", "",
+		"GGUF model (Qwen3-ASR) that checks each utterance before it is typed: far more accurate, text appears after each pause instead of word by word. Default: refine_model in sound.json; --refine-model=off types live words immediately")
 	cmd.Flags().String("model", "",
-		"Path to Whisper model file. Falls back to config default_model")
+		"Path to the model file or directory. Default: default_model in sound.json")
 	cmd.Flags().String("language", "",
-		"Language code for transcription (e.g. tr, en, de). Empty = auto-detect")
+		"Language code (e.g. tr, en, de). Default: language in sound.json; empty = auto-detect")
 
 	return cmd
 }
@@ -175,7 +219,18 @@ func dictateLoop(
 	engine core.Transcriber,
 	injector *keyboard.RobotGoInjector,
 	backend string,
+	refiner *tcasr.Refiner,
 ) error {
+	// Native streaming (Nemotron): words are typed as they are spoken, or, with
+	// a refiner, each utterance is typed once it has been checked.
+	if live, ok := engine.(core.LiveTranscriber); ok {
+		if refiner == nil {
+			log.Println("[dictate] using native streaming (words typed as you speak)")
+			return dictateLoopLive(ctx, hk, capturer, live, injector, nil)
+		}
+		return dictateLoopLive(ctx, hk, capturer, live, injector, refiner)
+	}
+
 	// Check if engine supports streaming.
 	streamEngine, isStreaming := engine.(core.StreamingTranscriber)
 
@@ -188,6 +243,143 @@ func dictateLoop(
 	return dictateLoopBatch(ctx, hk, capturer, engine, injector)
 }
 
+// dictateLoopLive implements push-to-talk on top of a native LiveStream. The
+// model hears audio continuously while the key is held; each finalised word is
+// typed once, about a second after it is spoken. Pauses split the dictation
+// into utterances, which are joined with a space.
+func dictateLoopLive(
+	ctx context.Context,
+	hk *hotkey.Hotkey,
+	capturer *audio.MalgoCapturer,
+	engine core.LiveTranscriber,
+	injector *keyboard.RobotGoInjector,
+	refiner *tcasr.Refiner,
+) error {
+	stream, err := engine.NewLiveStream()
+	if err != nil {
+		return fmt.Errorf("open live stream: %w", err)
+	}
+	defer stream.Close()
+
+	vad, closeVAD := audio.OpenVAD()
+	defer closeVAD()
+	liveCfg := pipeline.DefaultLiveConfig()
+	if cfg := config.Load(); cfg != nil {
+		liveCfg.Corrector = core.NewCorrector(cfg.Corrections)
+	}
+	var typer *refinedTyper
+	if refiner != nil {
+		liveCfg.Refiner = refiner
+		typer = newRefinedTyper(injector.TypeText)
+	}
+
+	for {
+		log.Println("[dictate] waiting for hotkey press...")
+		if !waitForEvent(ctx, hk.Keydown()) {
+			return nil
+		}
+		log.Println("[dictate] hotkey pressed — listening...")
+		stream.Reset()
+		vad.Reset()
+		if typer != nil {
+			typer.reset()
+		}
+
+		audioCh := make(chan []int16, 256)
+		captureCtx, captureCancel := context.WithCancel(ctx)
+		var meter levelMeter
+		var stats pipeline.LiveStats
+		sessionCfg := liveCfg
+		sessionCfg.Stats = &stats
+		err := capturer.Start(captureCtx, func(pcm []int16) {
+			meter.Add(pcm)
+			chunk := make([]int16, len(pcm))
+			copy(chunk, pcm)
+			select {
+			case audioCh <- chunk:
+			default: // consumer is behind; dropping beats unbounded growth
+			}
+		})
+		if err != nil {
+			captureCancel()
+			log.Printf("[dictate] capture error: %v", err)
+			continue
+		}
+
+		typed := false // anything typed in this session
+		lastSeq := -1  // utterance whose words were typed last
+		var runErr error
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			runErr = pipeline.RunLive(ctx, stream, vad, audioCh, sessionCfg, func(ev pipeline.LiveEvent) {
+				if typer != nil {
+					typer.Handle(ev)
+					return
+				}
+				if ev.Delta == "" {
+					return
+				}
+				text := ev.Delta
+				if typed && ev.Seq != lastSeq {
+					text = " " + strings.TrimLeft(text, " ")
+				}
+				if err := injector.TypeText(text); err != nil {
+					log.Printf("[dictate] injection error: %v", err)
+					return
+				}
+				typed, lastSeq = true, ev.Seq
+			})
+		}()
+
+		if !waitForEvent(ctx, hk.Keyup()) {
+			captureCancel()
+			_ = capturer.Stop()
+			close(audioCh)
+			<-done
+			return nil
+		}
+		log.Println("[dictate] hotkey released — finishing...")
+		captureCancel()
+		_ = capturer.Stop()
+		close(audioCh) // RunLive flushes the last words
+		<-done
+		if typer != nil {
+			typer.Flush()
+		}
+		didType := typed || (typer != nil && typer.didType())
+		log.Println(meter.Summary(stats, didType))
+		if !didType {
+			// Keep the audio of a session that typed nothing so it can be
+			// replayed: gleann-plugin-sound transcribe <file>.
+			if dir, derr := os.UserHomeDir(); derr == nil {
+				p := filepath.Join(dir, ".gleann", "last-dictation.wav")
+				if serr := meter.SaveWAV(p); serr == nil {
+					log.Printf("[dictate] audio of this session saved to %s", p)
+				}
+			}
+		}
+		stream = recoverStream(engine, stream, runErr)
+	}
+}
+
+// recoverStream replaces a stream whose recognition failed (for example the
+// sidecar process was killed), so one crash does not silence every later
+// key press. A healthy stream is returned unchanged.
+func recoverStream(engine core.LiveTranscriber, stream core.LiveStream, runErr error) core.LiveStream {
+	if runErr == nil || errors.Is(runErr, context.Canceled) {
+		return stream
+	}
+	log.Printf("[dictate] recognition failed (%v) — restarting the stream", runErr)
+	_ = stream.Close()
+	fresh, err := engine.NewLiveStream()
+	if err != nil {
+		log.Printf("[dictate] cannot restart the stream: %v", err)
+		return stream
+	}
+	return fresh
+}
+
 // dictateLoopStreaming implements push-to-talk with real-time streaming.
 // Text appears incrementally while the user is still holding the hotkey.
 func dictateLoopStreaming(
@@ -198,7 +390,8 @@ func dictateLoopStreaming(
 	injector *keyboard.RobotGoInjector,
 	backend string,
 ) error {
-	vad := audio.DefaultVAD()
+	vad, closeVAD := audio.OpenVAD()
+	defer closeVAD()
 
 	for {
 		// ── Wait for Keydown ───────────────────────────────────

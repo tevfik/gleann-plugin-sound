@@ -318,27 +318,27 @@ func installCompletions() []string {
 
 	// Bash
 	bashDir := filepath.Join(home, ".local", "share", "bash-completion", "completions")
-	if err := os.MkdirAll(bashDir, 0o755); err == nil {
+	if script := completionFor("bash"); script != "" && os.MkdirAll(bashDir, 0o755) == nil {
 		path := filepath.Join(bashDir, "gleann-plugin-sound")
-		if err := os.WriteFile(path, []byte(bashCompletion()), 0o644); err == nil {
+		if err := os.WriteFile(path, []byte(script), 0o644); err == nil {
 			installed = append(installed, "bash → "+path)
 		}
 	}
 
 	// Zsh
 	zshDir := filepath.Join(home, ".local", "share", "zsh", "site-functions")
-	if err := os.MkdirAll(zshDir, 0o755); err == nil {
+	if script := completionFor("zsh"); script != "" && os.MkdirAll(zshDir, 0o755) == nil {
 		path := filepath.Join(zshDir, "_gleann-plugin-sound")
-		if err := os.WriteFile(path, []byte(zshCompletion()), 0o644); err == nil {
+		if err := os.WriteFile(path, []byte(script), 0o644); err == nil {
 			installed = append(installed, "zsh  → "+path)
 		}
 	}
 
 	// Fish
 	fishDir := filepath.Join(home, ".config", "fish", "completions")
-	if err := os.MkdirAll(fishDir, 0o755); err == nil {
+	if script := completionFor("fish"); script != "" && os.MkdirAll(fishDir, 0o755) == nil {
 		path := filepath.Join(fishDir, "gleann-plugin-sound.fish")
-		if err := os.WriteFile(path, []byte(fishCompletion()), 0o644); err == nil {
+		if err := os.WriteFile(path, []byte(script), 0o644); err == nil {
 			installed = append(installed, "fish → "+path)
 		}
 	}
@@ -404,13 +404,22 @@ func installDaemon() error {
 		return fmt.Errorf("config not found — run setup first")
 	}
 
-	binPath := cfg.InstallPath
-	if binPath == "" {
-		exe, err := os.Executable()
-		if err != nil {
-			return fmt.Errorf("resolve executable: %w", err)
+	// Prefer the binary that is running now: a saved install path goes stale
+	// when the project moves, and the service would then fail to start forever.
+	binPath := ""
+	if exe, err := os.Executable(); err == nil {
+		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+			binPath = resolved
 		}
-		binPath = exe
+	}
+	if binPath == "" && cfg.InstallPath != "" {
+		binPath = cfg.InstallPath
+	}
+	if binPath == "" {
+		return fmt.Errorf("cannot determine the gleann-plugin-sound binary path")
+	}
+	if _, err := os.Stat(binPath); err != nil {
+		return fmt.Errorf("binary %s not found: %w", binPath, err)
 	}
 
 	// The dictate command reads from config automatically.
@@ -428,6 +437,15 @@ func installDaemon() error {
 		return fmt.Errorf("daemon not supported on %s", runtime.GOOS)
 	}
 }
+
+// InstallDaemon installs and starts the dictate daemon (systemd/launchd/schtasks).
+func InstallDaemon() error { return installDaemon() }
+
+// RemoveDaemon stops and removes the dictate daemon.
+func RemoveDaemon() error { return removeDaemon() }
+
+// DaemonRunning reports whether the dictate daemon is active.
+func DaemonRunning() bool { return isDaemonRunning() }
 
 func removeDaemon() error {
 	switch runtime.GOOS {
@@ -493,6 +511,8 @@ func installSystemdService(binPath string, args []string) error {
 Description=gleann-plugin-sound dictation daemon
 After=graphical-session.target
 PartOf=graphical-session.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -503,6 +523,13 @@ RestartSec=5
 [Install]
 WantedBy=default.target
 `, execStart, envLines)
+
+	// Units from the project's earlier name run the same daemon (usually from
+	// a path that no longer exists); remove them so two never fight over the hotkey.
+	for _, legacy := range []string{"gleann-sound-dictate.service"} {
+		_ = exec.Command("systemctl", "--user", "disable", "--now", legacy).Run()
+		_ = os.Remove(filepath.Join(serviceDir, legacy))
+	}
 
 	servicePath := filepath.Join(serviceDir, "gleann-plugin-sound-dictate.service")
 	if err := os.WriteFile(servicePath, []byte(unit), 0o644); err != nil {
@@ -628,142 +655,22 @@ func removeWindowsTask() error {
 
 // ── Completion scripts ─────────────────────────────────────────
 
-func bashCompletion() string {
-	return `# gleann-plugin-sound bash completion
-_gleann_sound() {
-    local cur prev commands
-    COMPREPLY=()
-    cur="${COMP_WORDS[COMP_CWORD]}"
-    prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="transcribe listen serve dictate tui help"
+// CompletionScript renders the shell completion script for "bash", "zsh" or
+// "fish". The command line sets it to cobra's generator so the scripts always
+// match the real command tree.
+var CompletionScript func(shell string) (string, error)
 
-    case "${prev}" in
-        gleann-plugin-sound)
-            COMPREPLY=( $(compgen -W "${commands}" -- "${cur}") )
-            return 0
-            ;;
-        transcribe)
-            COMPREPLY=( $(compgen -W "--model --file --language --verbose --help" -- "${cur}") )
-            return 0
-            ;;
-        listen)
-            COMPREPLY=( $(compgen -W "--model --language --verbose --help" -- "${cur}") )
-            return 0
-            ;;
-        serve)
-            COMPREPLY=( $(compgen -W "--model --addr --language --verbose --help" -- "${cur}") )
-            return 0
-            ;;
-        dictate)
-            COMPREPLY=( $(compgen -W "--model --key --language --verbose --help" -- "${cur}") )
-            return 0
-            ;;
-        --model|--file)
-            COMPREPLY=( $(compgen -f -- "${cur}") )
-            return 0
-            ;;
-    esac
-
-    if [[ "${cur}" == -* ]]; then
-        COMPREPLY=( $(compgen -W "--model --verbose --help" -- "${cur}") )
-    fi
-}
-complete -F _gleann_sound gleann-plugin-sound
-`
-}
-
-func zshCompletion() string {
-	return `#compdef gleann-plugin-sound
-# gleann-plugin-sound zsh completion
-
-_gleann_sound() {
-    local -a commands
-    commands=(
-        'transcribe:Transcribe an audio file to text'
-        'listen:Continuous real-time transcription from microphone'
-        'serve:Start gRPC server for gleann plugin'
-        'dictate:Push-to-talk dictation mode with hotkey'
-        'tui:Open interactive setup & configuration UI'
-        'help:Help about any command'
-    )
-
-    _arguments -C \
-        '--model[Path to whisper model]:file:_files' \
-        '--verbose[Enable verbose logging]' \
-        '--help[Show help]' \
-        '1:command:->cmds' \
-        '*::arg:->args'
-
-    case "$state" in
-        cmds)
-            _describe -t commands 'gleann-plugin-sound command' commands
-            ;;
-        args)
-            case "${words[1]}" in
-                transcribe)
-                    _arguments \
-                        '--model[Path to whisper model]:file:_files' \
-                        '--file[Audio file to transcribe]:file:_files' \
-                        '--language[Whisper language code]:language:' \
-                        '--verbose[Enable verbose logging]'
-                    ;;
-                listen)
-                    _arguments \
-                        '--model[Path to whisper model]:file:_files' \
-                        '--language[Whisper language code]:language:' \
-                        '--verbose[Enable verbose logging]'
-                    ;;
-                serve)
-                    _arguments \
-                        '--model[Path to whisper model]:file:_files' \
-                        '--addr[gRPC listen address]:address:' \
-                        '--language[Whisper language code]:language:' \
-                        '--verbose[Enable verbose logging]'
-                    ;;
-                dictate)
-                    _arguments \
-                        '--model[Path to whisper model]:file:_files' \
-                        '--key[Hotkey combination]:key:' \
-                        '--language[Whisper language code]:language:' \
-                        '--verbose[Enable verbose logging]'
-                    ;;
-            esac
-            ;;
-    esac
-}
-
-_gleann_sound "$@"
-`
-}
-
-func fishCompletion() string {
-	return `# gleann-plugin-sound fish completion
-complete -c gleann-plugin-sound -n '__fish_use_subcommand' -a transcribe -d 'Transcribe an audio file to text'
-complete -c gleann-plugin-sound -n '__fish_use_subcommand' -a listen -d 'Continuous real-time transcription'
-complete -c gleann-plugin-sound -n '__fish_use_subcommand' -a serve -d 'Start gRPC server for gleann plugin'
-complete -c gleann-plugin-sound -n '__fish_use_subcommand' -a dictate -d 'Push-to-talk dictation with hotkey'
-complete -c gleann-plugin-sound -n '__fish_use_subcommand' -a tui -d 'Open interactive setup & config'
-complete -c gleann-plugin-sound -n '__fish_use_subcommand' -a help -d 'Help about any command'
-
-# Global flags
-complete -c gleann-plugin-sound -l model -d 'Path to whisper model' -r -F
-complete -c gleann-plugin-sound -l verbose -d 'Enable verbose logging'
-complete -c gleann-plugin-sound -l help -d 'Show help'
-
-# transcribe
-complete -c gleann-plugin-sound -n '__fish_seen_subcommand_from transcribe' -l file -d 'Audio file to transcribe' -r -F
-complete -c gleann-plugin-sound -n '__fish_seen_subcommand_from transcribe' -l language -d 'Whisper language code' -r
-
-# listen
-complete -c gleann-plugin-sound -n '__fish_seen_subcommand_from listen' -l language -d 'Whisper language code' -r
-
-# serve
-complete -c gleann-plugin-sound -n '__fish_seen_subcommand_from serve' -l addr -d 'gRPC listen address' -r
-
-# dictate
-complete -c gleann-plugin-sound -n '__fish_seen_subcommand_from dictate' -l key -d 'Hotkey combination' -r
-complete -c gleann-plugin-sound -n '__fish_seen_subcommand_from dictate' -l language -d 'Whisper language code' -r
-`
+// completionFor returns the completion script for shell, or "" when no
+// generator is registered or it fails.
+func completionFor(shell string) string {
+	if CompletionScript == nil {
+		return ""
+	}
+	script, err := CompletionScript(shell)
+	if err != nil {
+		return ""
+	}
+	return script
 }
 
 // ── Helpers ────────────────────────────────────────────────────

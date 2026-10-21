@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -206,39 +207,25 @@ func TestInstallModelView(t *testing.T) {
 
 // ── Shell Completion Tests ─────────────────────────────────────
 
-func TestBashCompletion(t *testing.T) {
-	c := bashCompletion()
-	if c == "" {
-		t.Error("bash completion is empty")
-	}
-	for _, word := range []string{"gleann-plugin-sound", "transcribe", "listen", "serve", "dictate", "tui"} {
-		if !contains(c, word) {
-			t.Errorf("bash completion missing %q", word)
-		}
-	}
-}
+func TestCompletionFor(t *testing.T) {
+	old := CompletionScript
+	defer func() { CompletionScript = old }()
 
-func TestZshCompletion(t *testing.T) {
-	c := zshCompletion()
-	if c == "" {
-		t.Error("zsh completion is empty")
+	CompletionScript = nil
+	if got := completionFor("bash"); got != "" {
+		t.Errorf("without a generator completionFor = %q, want empty", got)
 	}
-	for _, word := range []string{"gleann-plugin-sound", "transcribe", "listen", "serve", "dictate", "tui"} {
-		if !contains(c, word) {
-			t.Errorf("zsh completion missing %q", word)
-		}
-	}
-}
 
-func TestFishCompletion(t *testing.T) {
-	c := fishCompletion()
-	if c == "" {
-		t.Error("fish completion is empty")
-	}
-	for _, word := range []string{"gleann-plugin-sound", "transcribe", "listen", "serve", "dictate", "tui"} {
-		if !contains(c, word) {
-			t.Errorf("fish completion missing %q", word)
+	CompletionScript = func(shell string) (string, error) { return "# " + shell, nil }
+	for _, shell := range []string{"bash", "zsh", "fish"} {
+		if got := completionFor(shell); got != "# "+shell {
+			t.Errorf("completionFor(%q) = %q", shell, got)
 		}
+	}
+
+	CompletionScript = func(string) (string, error) { return "x", fmt.Errorf("boom") }
+	if got := completionFor("bash"); got != "" {
+		t.Errorf("failing generator: completionFor = %q, want empty", got)
 	}
 }
 
@@ -275,8 +262,8 @@ func TestHomeModelPostSetup(t *testing.T) {
 	// With completed config, should show full menu.
 	cfg := &config.Config{Completed: true, DefaultModel: "test", Language: "tr", Hotkey: "ctrl+space"}
 	m := NewHomeModelWithConfig(cfg)
-	if len(m.items) != 8 {
-		t.Errorf("post-setup menu items = %d, want 8", len(m.items))
+	if len(m.items) != 10 {
+		t.Errorf("post-setup menu items = %d, want 10", len(m.items))
 	}
 	// First should be Dictate.
 	if m.items[0].title != "Dictate" {
@@ -338,11 +325,11 @@ func TestHotkeyPresetSelection(t *testing.T) {
 		t.Errorf("hotkeyCursor = %d, want 1", sm.hotkeyCursor)
 	}
 
-	// Select it (enter) — should advance to gRPC phase.
+	// Select it (enter) — should advance to the output phase.
 	updated, _ = sm.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	sm = updated.(SetupModel)
-	if sm.phase != phaseGRPC {
-		t.Errorf("phase = %d, want phaseGRPC", sm.phase)
+	if sm.phase != phaseOutput {
+		t.Errorf("phase = %d, want phaseOutput", sm.phase)
 	}
 	if sm.selectedHotkey() != "ctrl+alt+space" {
 		t.Errorf("selectedHotkey = %q, want ctrl+alt+space", sm.selectedHotkey())

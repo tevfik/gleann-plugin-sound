@@ -17,25 +17,29 @@ import (
 	"github.com/tevfik/gleann-plugin-sound/internal/config"
 	"github.com/tevfik/gleann-plugin-sound/internal/core"
 	"github.com/tevfik/gleann-plugin-sound/internal/pipeline"
+	"github.com/tevfik/gleann-plugin-sound/internal/tcasr"
 )
 
-// newListenCmd creates the "listen" subcommand (Mode 2: Live CLI Stream).
+// newListenCmd creates the "listen" subcommand (Live CLI Stream).
 func newListenCmd() *cobra.Command {
 	var outputFile string
 	var sourceFlag string
+	var partials bool
+	var refineModel string
 
 	cmd := &cobra.Command{
 		Use:   "listen",
 		Short: "Live audio transcription streamed as JSON to stdout",
-		Long: `Mode 2 — Live CLI Streaming (Sliding Window Pipeline).
+		Long: `Live CLI streaming.
 
-Captures audio from the selected source (microphone, speaker/loopback, or both),
-uses a sliding-window pipeline with VAD pre-checks and text deduplication to
-deliver continuous, real-time transcription.
+Captures audio from the selected source (microphone, speaker/loopback, or both)
+and prints one JSON line per utterance. With a streaming backend (tc or nemotron) the model is
+fed audio continuously (cache-aware streaming, ~0.6 s chunks), so text follows
+speech with sub-second latency; an utterance ends after a pause. --partials also
+prints provisional lines as words arrive.
 
-The pipeline processes 3-second overlapping windows every 2 seconds, with
-context carryover between windows for coherent output.  This replaces the
-older utterance-based mode and handles continuous speech without gaps.
+The whisper and onnx backends use a sliding-window pipeline (3-10 s windows, with VAD and
+deduplication).
 
 Audio sources:
   mic      — Default microphone input (default)
@@ -69,9 +73,11 @@ Press Ctrl+C to stop.`,
 				engine.SetLanguage(lang)
 			}
 
-			// Cast to StreamingTranscriber for the pipeline.
-			streamEngine, ok := engine.(core.StreamingTranscriber)
-			if !ok {
+			// Native streaming (Nemotron) is preferred; other backends fall
+			// back to the sliding-window pipeline.
+			liveEngine, isLive := engine.(core.LiveTranscriber)
+			streamEngine, isWindowed := engine.(core.StreamingTranscriber)
+			if !isLive && !isWindowed {
 				return fmt.Errorf("backend %q does not support streaming transcription", backend)
 			}
 
@@ -91,7 +97,8 @@ Press Ctrl+C to stop.`,
 			log.Printf("[listen] audio source: %s", audioSource)
 
 			capturer := audio.NewMalgoCapturerWithSource(audioSource)
-			vad := audio.DefaultVAD()
+			vad, closeVAD := audio.OpenVAD()
+			defer closeVAD()
 
 			// ── Signal handling ────────────────────────────────────
 			ctx, cancel := context.WithCancel(cmd.Context())
@@ -136,17 +143,23 @@ Press Ctrl+C to stop.`,
 				log.Printf("[listen] output file: %s", outputFile)
 			}
 
-			writeResult := func(result core.StreamResult) {
+			writeResult := func(result core.StreamResult, who string) {
 				seg := core.Segment{
 					Start: result.Start,
 					End:   result.End,
 					Text:  result.Text,
 				}
 				js := newJSONSegment(seg)
+				js.Seq = result.WindowSeq
+				js.Speaker = who
 				_ = stdoutEnc.Encode(js)
 				if outFile != nil {
 					if outIsTxt {
-						fmt.Fprintf(outFile, "%s\n", strings.TrimSpace(result.Text))
+						line := strings.TrimSpace(result.Text)
+						if who != "" {
+							line = who + ": " + line
+						}
+						fmt.Fprintf(outFile, "%s\n", line)
 					} else {
 						_ = json.NewEncoder(outFile).Encode(js)
 					}
@@ -183,15 +196,74 @@ Press Ctrl+C to stop.`,
 			log.Println("[listen] streaming pipeline active — listening… (Ctrl+C to stop)")
 
 			// ── Run the streaming pipeline ─────────────────────────
-			// ONNX CPU inference is much slower — use larger windows.
-			pipeCfg := pipeline.DefaultConfig()
-			if backend == "onnx" || backend == "nemotron" {
-				pipeCfg = pipeline.ONNXConfig()
+			if isLive {
+				stream, serr := liveEngine.NewLiveStream()
+				if serr != nil {
+					return fmt.Errorf("failed to open live stream: %w", serr)
+				}
+				defer stream.Close()
+				liveCfg := pipeline.DefaultLiveConfig()
+				var refiner *tcasr.Refiner
+				if cfg := config.Load(); cfg != nil {
+					liveCfg.Corrector = core.NewCorrector(cfg.Corrections)
+				}
+				refineModel = resolveRefineModel(refineModel)
+				if refineModel != "" {
+					var rerr error
+					if refiner, rerr = tcasr.NewRefiner(config.ExpandPath(refineModel), lang); rerr != nil {
+						return fmt.Errorf("refiner: %w", rerr)
+					}
+				}
+				if sp, _ := cmd.Flags().GetBool("speakers"); sp || !cmd.Flags().Changed("speakers") {
+					labeler, closeSp, lerr := newSpeakerLabeler(sp)
+					if lerr != nil {
+						return fmt.Errorf("speakers: %w", lerr)
+					}
+					defer closeSp()
+					liveCfg.Speakers = labeler
+				}
+				log.Println("[listen] native streaming: words appear ~1 s after they are spoken")
+				if refiner != nil {
+					defer refiner.Close()
+					liveCfg.Refiner = refiner
+					log.Println("[listen] refinement on: finished utterances are re-transcribed in the background")
+				}
+				err = pipeline.RunLive(ctx, stream, vad, audioCh, liveCfg, func(ev pipeline.LiveEvent) {
+					if ev.Refined {
+						_ = stdoutEnc.Encode(jsonSegment{
+							StartMs: ev.Start.Milliseconds(), EndMs: ev.End.Milliseconds(),
+							Text: ev.Text, Refined: true, Seq: ev.Seq + 1, Speaker: ev.Speaker, Part: ev.Part, Parts: ev.Parts,
+						})
+						if outFile != nil && !outIsTxt {
+							_ = json.NewEncoder(outFile).Encode(jsonSegment{
+								StartMs: ev.Start.Milliseconds(), EndMs: ev.End.Milliseconds(),
+								Text: ev.Text, Refined: true, Seq: ev.Seq + 1, Speaker: ev.Speaker, Part: ev.Part, Parts: ev.Parts,
+							})
+						}
+						return
+					}
+					if !ev.Final {
+						if partials && (ev.Pending != "" || ev.Delta != "") {
+							_ = stdoutEnc.Encode(jsonSegment{
+								StartMs: ev.Start.Milliseconds(), EndMs: ev.End.Milliseconds(),
+								Text: strings.TrimSpace(ev.Text + " " + ev.Pending), Partial: true,
+							})
+						}
+						return
+					}
+					writeResult(core.StreamResult{Text: ev.Text, Start: ev.Start, End: ev.End, IsFinal: true, WindowSeq: ev.Seq + 1}, ev.Speaker)
+				})
+			} else {
+				// ONNX CPU inference is much slower — use larger windows.
+				pipeCfg := pipeline.DefaultConfig()
+				if backend == "onnx" {
+					pipeCfg = pipeline.ONNXConfig()
+				}
+				pipe := pipeline.NewStreamingPipeline(streamEngine, vad, pipeCfg)
+				err = pipe.Run(ctx, audioCh, func(result core.StreamResult) {
+					writeResult(result, "")
+				})
 			}
-			pipe := pipeline.NewStreamingPipeline(streamEngine, vad, pipeCfg)
-			err = pipe.Run(ctx, audioCh, func(result core.StreamResult) {
-				writeResult(result)
-			})
 
 			if outFile != nil {
 				_ = outFile.Sync()
@@ -211,6 +283,12 @@ Press Ctrl+C to stop.`,
 		"Audio source: mic (default), speaker (loopback/desktop audio), both")
 	cmd.Flags().String("language", "",
 		"Language code for transcription (e.g. tr, en, de). Empty = auto-detect")
+	cmd.Flags().Bool("speakers", false,
+		"Label each utterance with its speaker. On by default once voices are enrolled ('speakers enroll'); this flag also numbers unenrolled voices, --speakers=false turns it off")
+	cmd.Flags().StringVar(&refineModel, "refine-model", "",
+		"GGUF model (e.g. Qwen3-ASR-1.7B-Q8_0.gguf) that re-transcribes each finished utterance in the background; arrives as \"refined\":true lines")
+	cmd.Flags().BoolVar(&partials, "partials", false,
+		"Also print provisional lines (\"partial\":true) while an utterance is still being spoken (tc, nemotron)")
 
 	return cmd
 }

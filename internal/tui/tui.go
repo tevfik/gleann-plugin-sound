@@ -8,12 +8,13 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/tevfik/gleann-plugin-sound/internal/config"
+	"github.com/tevfik/gleann-plugin-sound/internal/speaker"
 )
 
 // Run starts the interactive TUI application loop.
 // It shows the home screen and routes to sub-screens.
 // If onboarding (setup) is not completed, only Setup + Quit are shown.
-// After setup is done, the full menu with Dictate/Listen/Transcribe appears.
+// After setup is done, the full menu (Dictate, Listen, Serve, Test, ...) appears.
 func Run() error {
 	for {
 		// ── Home screen ──
@@ -38,7 +39,7 @@ func Run() error {
 		case ScreenListen:
 			runCLIMode(h.Config(), "listen")
 		case ScreenServe:
-			runCLIMode(h.Config(), "serve")
+			runCLIMode(h.Config(), "plugin-serve")
 		case ScreenInstall:
 			if err := runInstall(); err != nil {
 				return err
@@ -49,6 +50,10 @@ func Run() error {
 			}
 		case ScreenTest:
 			runCLIMode(h.Config(), "test")
+		case ScreenSpeakers:
+			runSpeakers()
+		case ScreenUpdate:
+			runSubcommand("update")
 		}
 	}
 }
@@ -112,7 +117,44 @@ func runUninstall() error {
 	return nil
 }
 
-// runCLIMode launches a gleann-plugin-sound subcommand (dictate, listen, transcribe)
+// runSpeakers shows the voice manager; adding or re-recording a voice hands the
+// terminal to `speakers record <name>` and comes back to the list.
+func runSpeakers() {
+	for {
+		p := tea.NewProgram(NewSpeakersModel(speaker.DefaultPath()), tea.WithAltScreen())
+		result, err := p.Run()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "speakers: %v\n", err)
+			return
+		}
+		m := result.(SpeakersModel)
+		if action, name := m.Action(); action == spActionRecord {
+			runSubcommand("speakers", "record", name, "--lang", m.Lang())
+			continue
+		}
+		return
+	}
+}
+
+// runSubcommand runs another gleann-plugin-sound command in this terminal and
+// waits for enter before the TUI redraws.
+func runSubcommand(args ...string) {
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return
+	}
+	cmd := exec.Command(exe, args...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "\n%v\n", err)
+	}
+	fmt.Println("\nPress enter to return to menu...")
+	buf := make([]byte, 1)
+	_, _ = os.Stdin.Read(buf)
+}
+
+// runCLIMode launches a gleann-plugin-sound subcommand (dictate, listen, plugin-serve, test)
 // in the current terminal with config-derived flags, then returns to the TUI.
 func runCLIMode(cfg *config.Config, mode string) {
 	exe, err := os.Executable()
@@ -134,9 +176,6 @@ func runCLIMode(cfg *config.Config, mode string) {
 		}
 		if mode == "dictate" && cfg.Hotkey != "" {
 			args = append(args, "--key", cfg.Hotkey)
-		}
-		if (mode == "dictate" || mode == "serve") && cfg.GRPCAddr != "" {
-			args = append(args, "--addr", cfg.GRPCAddr)
 		}
 		if (mode == "listen" || mode == "transcribe") && cfg.OutputDir != "" {
 			args = append(args, "--output", cfg.OutputDir)

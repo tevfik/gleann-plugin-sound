@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -10,28 +11,34 @@ import (
 	"github.com/tevfik/gleann-plugin-sound/internal/config"
 	"github.com/tevfik/gleann-plugin-sound/internal/core"
 	"github.com/tevfik/gleann-plugin-sound/internal/httpserver"
+	"github.com/tevfik/gleann-plugin-sound/internal/tcasr"
 )
 
 // newPluginServeCmd creates the "plugin-serve" subcommand.
 //
 // This runs an HTTP server that conforms to the gleann PluginManager contract
-// (GET /health, POST /convert) so that gleann build can automatically
+// (GET /health, GET /info, POST /convert) so that gleann build can automatically
 // transcribe audio/video files during index construction.
 //
 // Usage:
 //
-//	gleann-plugin-sound plugin-serve --port 8766
+//	gleann-plugin-sound plugin-serve --port 8767
 func newPluginServeCmd() *cobra.Command {
 	var port int
 
 	cmd := &cobra.Command{
 		Use:   "plugin-serve",
-		Short: "Run HTTP server for gleann plugin integration (document extraction)",
+		Short: "Run HTTP server for gleann plugin integration (audio transcription)",
 		Long: `Starts an HTTP server that integrates with the gleann PluginManager.
 
 When gleann builds an index and encounters audio/video files (.mp3, .wav, etc.),
-it sends them to this server for transcription. The server runs Whisper inference
-and returns the transcribed text as markdown.
+it sends them to this server for transcription. The server runs the configured
+backend and returns the transcribed text as markdown.
+
+It also serves GET /live, a WebSocket that streams audio from a phone, browser
+or meeting recorder (16 kHz mono PCM) and returns words in real time; see the
+README for the protocol. /live needs a streaming backend (tc or nemotron).
+Off loopback (--host 0.0.0.0) a --token is mandatory.
 
 The model is loaded lazily on the first request to keep startup fast.
 Register this plugin with 'gleann-plugin-sound install' before use.`,
@@ -53,7 +60,41 @@ Register this plugin with 'gleann-plugin-sound install' before use.`,
 				return core.NewTranscriber(backend, modelPath)
 			}
 
+			host, _ := cmd.Flags().GetString("host")
+			token, _ := cmd.Flags().GetString("token")
+			if token == "" {
+				token = os.Getenv("GLEANN_SOUND_TOKEN")
+			}
+			maxLive, _ := cmd.Flags().GetInt("max-live")
+
 			srv := httpserver.New(factory, language, port)
+			refineFlag, _ := cmd.Flags().GetString("refine-model")
+			refineModel := resolveRefineModel(refineFlag)
+			if sp, _ := cmd.Flags().GetBool("speakers"); sp || !cmd.Flags().Changed("speakers") {
+				labeler, closeSp, lerr := newSpeakerLabeler(sp)
+				if lerr != nil {
+					return fmt.Errorf("speakers: %w", lerr)
+				}
+				defer closeSp()
+				if labeler != nil {
+					srv.SetSpeakers(labeler)
+				}
+			}
+			if refineModel != "" {
+				r, rerr := tcasr.NewRefiner(config.ExpandPath(refineModel), language)
+				if rerr != nil {
+					return fmt.Errorf("refiner: %w", rerr)
+				}
+				defer r.Close()
+				srv.SetRefiner(r)
+				log.Printf("[plugin-serve] /live refinement on (%s)", refineModel)
+			}
+			if err := srv.SetListen(host, token, maxLive); err != nil {
+				return err
+			}
+			if cfg := config.Load(); cfg != nil {
+				srv.SetCorrector(core.NewCorrector(cfg.Corrections))
+			}
 			defer srv.Close()
 
 			// Graceful shutdown on SIGINT/SIGTERM.
@@ -70,10 +111,18 @@ Register this plugin with 'gleann-plugin-sound install' before use.`,
 		},
 	}
 
-	cmd.Flags().IntVar(&port, "port", 8766, "HTTP port for the plugin server")
+	cmd.Flags().IntVar(&port, "port", 8767, "HTTP port for the plugin server")
+	cmd.Flags().String("host", "127.0.0.1",
+		"Address to listen on. Use 0.0.0.0 to accept phones/other machines (requires --token)")
+	cmd.Flags().String("token", "",
+		"Access token required by the /live WebSocket (or env GLEANN_SOUND_TOKEN)")
+	cmd.Flags().Bool("speakers", false,
+		"Label /live utterances with their speaker (auto-on once voices are enrolled; --speakers=false disables)")
+	cmd.Flags().String("refine-model", "",
+		"GGUF model (Qwen3-ASR) that re-transcribes each /live utterance after it ends ({\"type\":\"refined\"}). Default: refine_model from sound.json; --refine-model=off disables")
+	cmd.Flags().Int("max-live", httpserver.DefaultMaxLive, "Maximum concurrent /live sessions")
 	cmd.Flags().String("language", "",
 		"Language code for transcription (e.g. tr, en). Empty = auto-detect")
 
 	return cmd
 }
-

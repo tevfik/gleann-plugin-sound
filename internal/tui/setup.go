@@ -19,7 +19,7 @@ import (
 //
 // Onboarding order:
 //   models → download → backend → exec provider → default model →
-//   language → hotkey → gRPC → output → audio source → summary
+//   language → hotkey → output → audio source → summary
 //
 // Reconfiguration (cfg.Completed):
 //   overview → (jump to any phase) → overview
@@ -30,13 +30,12 @@ const (
 	phaseOverview          setupPhase = iota // settings overview (reconfigure mode)
 	phaseModelSelect                         // select models to download
 	phaseDownloading                         // downloading models
-	phaseBackend                             // backend selection (whisper / onnx)
+	phaseBackend                             // backend selection (whisper / onnx / nemotron / tc)
 	phaseExecutionProvider                   // ONNX execution provider (auto / cuda / cpu)
 	phasePipInstall                          // pip install onnxruntime-gpu prompt
 	phaseDefaultModel                        // choose default model
 	phaseLanguage                            // language selection
 	phaseHotkey                              // hotkey configuration
-	phaseGRPC                                // gRPC server configuration
 	phaseOutput                              // output directory for transcriptions
 	phaseAudioSource                         // audio source selection (mic / speaker / both)
 	phaseSummary                             // summary & confirm
@@ -53,7 +52,6 @@ var onboardingOrder = []setupPhase{
 	phaseDefaultModel,
 	phaseLanguage,
 	phaseHotkey,
-	phaseGRPC,
 	phaseOutput,
 	phaseAudioSource,
 	phaseSummary,
@@ -89,7 +87,6 @@ var overviewItems = []overviewItem{
 	{"Default Model", phaseDefaultModel},
 	{"Language", phaseLanguage},
 	{"Dictation Hotkey", phaseHotkey},
-	{"gRPC Server", phaseGRPC},
 	{"Output Directory", phaseOutput},
 	{"Audio Source", phaseAudioSource},
 	{"Save & Exit", phaseSummary},
@@ -135,11 +132,6 @@ type SetupModel struct {
 	hotkeyCursor  int            // cursor position in preset list
 	hotkeyCustom  bool           // user is typing custom hotkey string
 	hotkeyInput   string         // custom text input buffer
-
-	// gRPC server.
-	grpcEnabled bool   // whether gRPC server is enabled alongside dictation
-	grpcAddr    string // listen address (e.g. "localhost:50051")
-	grpcEditing bool   // user is editing the address
 
 	// Backend selection.
 	backendOptions []string // available backends
@@ -226,8 +218,6 @@ func NewSetupModel(existingCfg *config.Config) SetupModel {
 	hotkeyCustom := false
 	hotkeyInput := ""
 	existingDefault := ""
-	grpcEnabled := false
-	grpcAddr := "localhost:50051"
 	backendCursor := 0  // 0 = whisper
 	providerCursor := 0 // 0 = auto
 	outputDir := "~/.gleann/transcriptions"
@@ -235,14 +225,12 @@ func NewSetupModel(existingCfg *config.Config) SetupModel {
 	isReconfigure := false
 	if existingCfg != nil {
 		existingDefault = existingCfg.DefaultModel
-		if existingCfg.GRPCAddr != "" {
-			grpcEnabled = true
-			grpcAddr = existingCfg.GRPCAddr
-		}
 		if existingCfg.Backend == "onnx" {
 			backendCursor = 1
 		} else if existingCfg.Backend == "nemotron" {
 			backendCursor = 2
+		} else if existingCfg.Backend == "tc" {
+			backendCursor = 3
 		}
 		switch existingCfg.ExecutionProvider {
 		case "cuda":
@@ -304,9 +292,7 @@ func NewSetupModel(existingCfg *config.Config) SetupModel {
 		hotkeyCustom:         hotkeyCustom,
 		hotkeyInput:          hotkeyInput,
 		existingDefaultModel: existingDefault,
-		grpcEnabled:          grpcEnabled,
-		grpcAddr:             grpcAddr,
-		backendOptions:       []string{"whisper", "onnx", "nemotron"},
+		backendOptions:       []string{"whisper", "onnx", "nemotron", "tc"},
 		backendCursor:        backendCursor,
 		providerOptions:      []string{"auto", "cuda", "cpu"},
 		providerCursor:       providerCursor,
@@ -328,9 +314,9 @@ func (m SetupModel) Init() tea.Cmd {
 	return m.spinner.Tick
 }
 
-func (m SetupModel) Cancelled() bool         { return m.cancelled }
-func (m SetupModel) Done() bool              { return m.done }
-func (m SetupModel) Result() *config.Config  { return m.result }
+func (m SetupModel) Cancelled() bool        { return m.cancelled }
+func (m SetupModel) Done() bool             { return m.done }
+func (m SetupModel) Result() *config.Config { return m.result }
 
 // ── Phase navigation helpers ──────────────────────────────────
 
@@ -538,10 +524,6 @@ func (m SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			// In text editing modes, esc exits editing.
-			if m.phase == phaseGRPC && m.grpcEditing {
-				m.grpcEditing = false
-				return m, nil
-			}
 			if m.phase == phaseOutput && m.outputEditing {
 				m.outputEditing = false
 				return m, nil
@@ -575,8 +557,6 @@ func (m SetupModel) handlePhaseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updateLanguage(msg)
 	case phaseHotkey:
 		return m.updateHotkey(msg)
-	case phaseGRPC:
-		return m.updateGRPC(msg)
 	case phaseBackend:
 		return m.updateBackend(msg)
 	case phaseExecutionProvider:
@@ -814,46 +794,6 @@ func (m SetupModel) updateHotkey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// ── gRPC ───────────────────────────────────────────────────────
-
-func (m SetupModel) updateGRPC(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Address editing mode.
-	if m.grpcEditing {
-		key := msg.String()
-		switch key {
-		case "enter":
-			if m.grpcAddr != "" {
-				m.grpcEditing = false
-			}
-		case "backspace":
-			if len(m.grpcAddr) > 0 {
-				m.grpcAddr = m.grpcAddr[:len(m.grpcAddr)-1]
-			}
-		default:
-			if len(key) == 1 && key[0] >= 32 && key[0] <= 126 {
-				m.grpcAddr += key
-			}
-		}
-		return m, nil
-	}
-
-	// Toggle / navigation.
-	switch msg.String() {
-	case "up", "k", "down", "j", " ":
-		m.grpcEnabled = !m.grpcEnabled
-	case "e":
-		if m.grpcEnabled {
-			m.grpcEditing = true
-		}
-	case "enter":
-		if !m.grpcEnabled {
-			m.grpcAddr = ""
-		}
-		m.finishPhase()
-	}
-	return m, nil
-}
-
 // ── Backend ────────────────────────────────────────────────────
 
 func (m SetupModel) updateBackend(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1009,19 +949,29 @@ func (m SetupModel) filteredInstalledModels() []config.ModelEntry {
 	backend := m.backendOptions[m.backendCursor]
 	var filtered []config.ModelEntry
 	for _, e := range m.installedModels {
-		isCompatible := false
-		if backend == "whisper" {
-			isCompatible = !strings.HasPrefix(e.Name, "onnx-") && !strings.HasPrefix(e.Name, "nemotron-")
-		} else if backend == "onnx" {
-			isCompatible = strings.HasPrefix(e.Name, "onnx-")
-		} else if backend == "nemotron" {
-			isCompatible = strings.HasPrefix(e.Name, "nemotron-")
-		}
-		if isCompatible {
+		if modelFitsBackend(backend, e) {
 			filtered = append(filtered, e)
 		}
 	}
 	return filtered
+}
+
+// modelFitsBackend reports whether an installed model can be loaded by the
+// given backend: whisper takes GGML files, onnx the "onnx-" bundles, nemotron
+// the int4 ONNX bundle and tc (transcribe.cpp) the Nemotron GGUF.
+func modelFitsBackend(backend string, e config.ModelEntry) bool {
+	switch backend {
+	case "whisper":
+		return !strings.HasPrefix(e.Name, "onnx-") && !strings.HasPrefix(e.Name, "nemotron-") &&
+			!strings.HasSuffix(e.Path, ".gguf")
+	case "onnx":
+		return strings.HasPrefix(e.Name, "onnx-")
+	case "nemotron":
+		return strings.HasPrefix(e.Name, "nemotron-") && !strings.HasSuffix(e.Path, ".gguf")
+	case "tc":
+		return strings.HasPrefix(e.Name, "nemotron-") && strings.HasSuffix(e.Path, ".gguf")
+	}
+	return false
 }
 
 // selectedHotkey returns the currently selected hotkey string.
@@ -1056,27 +1006,13 @@ func (m SetupModel) buildConfig() *config.Config {
 		candidate := m.installedModels[m.defaultCursor]
 		// Validate that the selected model matches the backend.
 		backend := m.backendOptions[m.backendCursor]
-		isCompatible := false
-		if backend == "whisper" {
-			isCompatible = !strings.HasPrefix(candidate.Name, "onnx-") && !strings.HasPrefix(candidate.Name, "nemotron-")
-		} else if backend == "onnx" {
-			isCompatible = strings.HasPrefix(candidate.Name, "onnx-")
-		} else if backend == "nemotron" {
-			isCompatible = strings.HasPrefix(candidate.Name, "nemotron-")
-		}
+		isCompatible := modelFitsBackend(backend, candidate)
 		if isCompatible {
 			defaultModel = candidate.Path
 		} else {
 			// Mismatch — pick the first compatible model instead.
 			for _, e := range m.installedModels {
-				compatible := false
-				if backend == "whisper" {
-					compatible = !strings.HasPrefix(e.Name, "onnx-") && !strings.HasPrefix(e.Name, "nemotron-")
-				} else if backend == "onnx" {
-					compatible = strings.HasPrefix(e.Name, "onnx-")
-				} else if backend == "nemotron" {
-					compatible = strings.HasPrefix(e.Name, "nemotron-")
-				}
+				compatible := modelFitsBackend(backend, e)
 				if compatible {
 					defaultModel = e.Path
 					break
@@ -1096,19 +1032,16 @@ func (m SetupModel) buildConfig() *config.Config {
 
 	cfg := &config.Config{
 		DefaultModel: defaultModel,
-		Language:      lang,
-		Hotkey:        hotkey,
-		Models:        m.installedModels,
-		Backend:       backend,
-		AudioSource:   m.audioSourceOptions[m.audioSourceCursor],
-		OutputDir:     m.outputDir,
-		Completed:     true,
+		Language:     lang,
+		Hotkey:       hotkey,
+		Models:       m.installedModels,
+		Backend:      backend,
+		AudioSource:  m.audioSourceOptions[m.audioSourceCursor],
+		OutputDir:    m.outputDir,
+		Completed:    true,
 	}
 	if backend == "onnx" || backend == "nemotron" {
 		cfg.ExecutionProvider = m.providerOptions[m.providerCursor]
-	}
-	if m.grpcEnabled && m.grpcAddr != "" {
-		cfg.GRPCAddr = m.grpcAddr
 	}
 	return cfg
 }
@@ -1218,8 +1151,6 @@ func (m SetupModel) View() string {
 		b.WriteString(m.viewLanguage())
 	case phaseHotkey:
 		b.WriteString(m.viewHotkey())
-	case phaseGRPC:
-		b.WriteString(m.viewGRPC())
 	case phaseOutput:
 		b.WriteString(m.viewOutput())
 	case phaseAudioSource:
@@ -1322,13 +1253,6 @@ func (m SetupModel) overviewValues() map[setupPhase]string {
 	// Hotkey
 	vals[phaseHotkey] = m.selectedHotkey()
 
-	// gRPC
-	if m.grpcEnabled && m.grpcAddr != "" {
-		vals[phaseGRPC] = m.grpcAddr
-	} else {
-		vals[phaseGRPC] = "disabled"
-	}
-
 	// Output
 	if m.outputDir != "" {
 		vals[phaseOutput] = m.outputDir
@@ -1405,11 +1329,13 @@ func (m SetupModel) viewDownloading() string {
 func (m SetupModel) viewBackend() string {
 	var b strings.Builder
 	b.WriteString("  Select transcription backend:\n")
-	b.WriteString("  " + lipgloss.NewStyle().Foreground(ColorDimFg).Render("whisper.cpp (CPU) or ONNX Runtime (CPU/GPU)") + "\n\n")
+	b.WriteString("  " + lipgloss.NewStyle().Foreground(ColorDimFg).Render("whisper.cpp, ONNX Runtime, or the Nemotron streaming engine (transcribe.cpp)") + "\n\n")
 
 	descriptions := map[string]string{
-		"whisper": "whisper.cpp — CPU-only, low latency, no extra deps",
-		"onnx":    "ONNX Runtime — CPU/GPU, requires libonnxruntime",
+		"whisper":  "whisper.cpp — CPU-only, low latency, no extra deps",
+		"onnx":     "ONNX Runtime — Whisper ONNX bundles, CPU/GPU, requires libonnxruntime",
+		"nemotron": "Nemotron 3.5 streaming, int4 ONNX — real time, CPU/GPU",
+		"tc":       "Nemotron 3.5 streaming, GGUF Q8 (transcribe.cpp sidecar) — real time, best live accuracy",
 	}
 
 	for i, opt := range m.backendOptions {
@@ -1594,57 +1520,6 @@ func (m SetupModel) viewHotkey() string {
 	return b.String()
 }
 
-func (m SetupModel) viewGRPC() string {
-	var b strings.Builder
-	b.WriteString("  gRPC Server:\n")
-	b.WriteString("  " + lipgloss.NewStyle().Foreground(ColorDimFg).Render("Enable gRPC server alongside dictation for gleann integration") + "\n\n")
-
-	// Toggle display.
-	enabledStr := "○ Disabled"
-	enabledStyle := CheckboxUnchecked
-	if m.grpcEnabled {
-		enabledStr = "● Enabled"
-		enabledStyle = CheckboxChecked
-	}
-	b.WriteString(ActiveItemStyle.Render(fmt.Sprintf("  ▸ %s", enabledStyle.Render(enabledStr))))
-	b.WriteString("\n")
-
-	// Address display.
-	if m.grpcEnabled {
-		addrLabel := m.grpcAddr
-		if addrLabel == "" {
-			addrLabel = "localhost:50051"
-		}
-		b.WriteString("\n")
-		if m.grpcEditing {
-			b.WriteString(lipgloss.NewStyle().
-				Foreground(ColorPrimary).
-				Bold(true).
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(ColorPrimary).
-				Padding(0, 2).
-				MarginLeft(2).
-				Render("▎ " + m.grpcAddr))
-		} else {
-			b.WriteString(NormalItemStyle.Render(fmt.Sprintf("    Address: %s", addrLabel)))
-		}
-		b.WriteString("\n")
-	}
-
-	b.WriteString("\n")
-	if m.grpcEditing {
-		b.WriteString(StatusBarStyle.Render("  Type address • backspace to delete • enter to confirm • esc back"))
-	} else {
-		hints := "  space/↑/↓ toggle"
-		if m.grpcEnabled {
-			hints += " • e edit address"
-		}
-		hints += " • enter continue • esc back"
-		b.WriteString(StatusBarStyle.Render(hints))
-	}
-	return b.String()
-}
-
 func (m SetupModel) viewOutput() string {
 	var b strings.Builder
 	b.WriteString("  Output Directory:\n")
@@ -1732,11 +1607,6 @@ func (m SetupModel) viewSummary() string {
 
 	hotkey := m.selectedHotkey()
 
-	grpcStatus := "disabled"
-	if m.grpcEnabled && m.grpcAddr != "" {
-		grpcStatus = m.grpcAddr
-	}
-
 	backend := m.backendOptions[m.backendCursor]
 	audioSource := m.audioSourceOptions[m.audioSourceCursor]
 	outputDir := m.outputDir
@@ -1756,7 +1626,6 @@ func (m SetupModel) viewSummary() string {
 	items = append(items,
 		struct{ k, v string }{"Audio Source", audioSource},
 		struct{ k, v string }{"Output Directory", outputDir},
-		struct{ k, v string }{"gRPC Server", grpcStatus},
 		struct{ k, v string }{"Models Installed", fmt.Sprintf("%d", len(m.installedModels))},
 		struct{ k, v string }{"Config Path", config.ConfigPath()},
 	)
