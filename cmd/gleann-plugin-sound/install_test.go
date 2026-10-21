@@ -20,7 +20,7 @@ func TestInstallPreservesOtherPlugins(t *testing.T) {
 	  "timeout":120,"version":"1.4.0","schema_version":2,"priority":10},
 	 {"name":"gleann-plugin-sound","url":"http://localhost:8766","command":["old"],
 	  "capabilities":["document-extraction"],"extensions":[".mp3"]}]}`
-	os.WriteFile(filepath.Join(dir, "plugins.json"), []byte(existing), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "plugins.json"), []byte(existing), 0o644)
 
 	if err := installPlugin(newInstallPluginCmd(), 8767); err != nil {
 		t.Fatal(err)

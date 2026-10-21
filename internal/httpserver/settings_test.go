@@ -21,7 +21,7 @@ func settingsServer(t *testing.T, token string) (*httptest.Server, string) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	model := filepath.Join(home, "model.gguf")
-	os.WriteFile(model, []byte("x"), 0o644)
+	_ = os.WriteFile(model, []byte("x"), 0o644)
 	if err := config.Save(&config.Config{
 		DefaultModel: model, Language: "tr", Backend: "tc", Hotkey: "ctrl+shift+space",
 		Completed: true, InstallPath: "/keep/me",
@@ -98,7 +98,7 @@ func TestSettingsPutSavesAndKeepsOtherConfig(t *testing.T) {
 		Saved           []string
 		RestartRequired bool `json:"restart_required"`
 	}
-	json.NewDecoder(resp.Body).Decode(&out)
+	_ = json.NewDecoder(resp.Body).Decode(&out)
 	if len(out.Saved) != 5 || !out.RestartRequired {
 		t.Errorf("response = %+v", out)
 	}
@@ -121,7 +121,7 @@ func TestSettingsPutRejectsBadValuesAtomically(t *testing.T) {
 		t.Fatalf("status %d, want 422", resp.StatusCode)
 	}
 	var out struct{ Errors map[string]string }
-	json.NewDecoder(resp.Body).Decode(&out)
+	_ = json.NewDecoder(resp.Body).Decode(&out)
 	for _, k := range []string{"backend", "default_model", "hotkey", "speaker_threshold", "bogus"} {
 		if out.Errors[k] == "" {
 			t.Errorf("no error for %s: %v", k, out.Errors)
@@ -156,7 +156,7 @@ func TestInfoAdvertisesSettings(t *testing.T) {
 	resp, _ := http.Get(ts.URL + "/info")
 	b := new(strings.Builder)
 	var m map[string]any
-	json.NewDecoder(resp.Body).Decode(&m)
+	_ = json.NewDecoder(resp.Body).Decode(&m)
 	_ = b
 	if s, ok := m["settings"].(map[string]any); !ok || s["path"] != "/settings" {
 		t.Errorf("info = %v", m)
