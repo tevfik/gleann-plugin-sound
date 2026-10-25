@@ -54,7 +54,7 @@ func buildPostSetupMenuItems() []menuItem {
 	return []menuItem{
 		{title: "Dictate", desc: "Push-to-talk voice dictation", icon: "🎙 ", screen: ScreenDictate},
 		{title: "Listen", desc: "Continuous real-time transcription", icon: "👂", screen: ScreenListen},
-		{title: "Serve", desc: "Plugin server for gleann (HTTP + live WebSocket)", icon: "🔌", screen: ScreenServe},
+		serveMenuItem(),
 		{title: daemonTitle, desc: daemonDesc, icon: daemonIcon, screen: ScreenDaemonToggle},
 		{title: "Test", desc: "Diagnose mic, hotkey, speech model & keyboard", icon: "🔬", screen: ScreenTest},
 		{title: "Speakers", desc: "Enrol voices (record from the mic) so meetings show names", icon: "🗣 ", screen: ScreenSpeakers},
@@ -65,9 +65,6 @@ func buildPostSetupMenuItems() []menuItem {
 		{title: "Quit", desc: "Exit", icon: "👋", screen: ScreenHome},
 	}
 }
-
-// Menu items shown after onboarding is completed (default fallback).
-var postSetupMenuItems = buildPostSetupMenuItems()
 
 // HomeModel is the main TUI hub.
 type HomeModel struct {

@@ -333,8 +333,12 @@ func (hk *Hotkey) processEvents(ch <-chan evdevEvent, targetCode uint16) {
 
 			// Check if this is our target key.
 			if ev.code == targetCode {
-				log.Printf("[hotkey] TARGET key code=%d press=%v release=%v keyHeld=%v pressed=%v",
-					ev.code, isPress, isRel, keyHeld, pressed)
+				// Only the held-key count is logged, never which keys: the target
+				// is usually Space, so the full set would record typing.
+				if hk.Verbose {
+					log.Printf("[hotkey] TARGET key code=%d press=%v release=%v keyHeld=%v held=%d",
+						ev.code, isPress, isRel, keyHeld, len(pressed))
+				}
 				if isPress && !keyHeld {
 					// Verify all required modifiers are held.
 					allMods := true

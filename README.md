@@ -107,13 +107,25 @@ make build-all
 ```
 
 The TUI wizard guides you through:
-1. **Model Selection** — Choose and download Whisper models (full + quantized)
-2. **Default Model** — Set the model used when `--model` is not specified
-3. **Language** — Set default language (or auto-detect)
-4. **Hotkey** — Configure the push-to-talk hotkey for dictate mode
-5. **Backend** — Choose transcription backend (whisper or onnx)
-7. **Output Directory** — Set where transcription files are saved
-8. **Save** — Configuration saved to `~/.gleann/sound.json`
+1. **Preset** — *Recommended* (the most accurate setup measured, see
+   [Meeting pipeline](#meeting-pipeline-live-refined-with-names)), *Lightweight* or *Custom*.
+   A preset only pre-fills the next steps; each one can still be changed.
+2. **Model Selection** — Choose and download models (Whisper, Nemotron, the Qwen3-ASR refiner, Silero VAD)
+3. **Backend** — whisper, onnx, nemotron or tc
+4. **Default Model** — Set the model used when `--model` is not specified
+5. **Language** — Defaults to the system language (Türkçe/English); auto-detect is available
+6. **Refine Model** — Live backends only: a second model checks each utterance (on, off, or your own GGUF)
+7. **Hotkey** — Configure the push-to-talk hotkey for dictate mode
+8. **Output Directory** — Set where transcription files are saved
+9. **Save** — Configuration saved to `~/.gleann/sound.json` (settings the wizard does not edit, such as
+   `corrections`, are kept)
+
+The *Recommended* preset selects Nemotron 3.5 streaming Q8 (`tc` backend), Qwen3-ASR-1.7B Q8 as the
+refiner and the system language: about 3 GB of downloads plus the `gleann-asr-helper` sidecar (from the
+release, or `make asr-helper`). Measured on conversational Turkish it makes 17 % word errors against 39 %
+for live words alone. Dictation then types the checked text after each pause instead of word by word.
+An existing setup can switch it on from **Setup → Refine Model**, or with
+`gleann-plugin-sound models download qwen3-asr-1.7b-q8-gguf` and `refine_model` in `sound.json`.
 
 ### 4. Setup Input Device Access (Linux)
 
@@ -355,7 +367,7 @@ meeting, with a Turkish news broadcast mixed in as the "TV" (share of speech tim
 Limits: an utterance that changes speaker without any pause is split on audio, not on
 words, so a boundary can be off by a fraction of a second; overlapping speech is not
 separated; the live (unrefined) line carries only the utterance's dominant speaker;
-cosine threshold is `speaker_threshold` in `sound.json` (default 0.35).
+cosine threshold is `speaker_threshold` in `sound.json` (default 0.35; dictation uses the stricter `dictate_speaker_threshold`, see [Voice Dictation](#voice-dictation)).
 
 ### Transcribing recordings
 
@@ -582,6 +594,16 @@ With a streaming backend (`tc`, `nemotron`) there are two typing modes:
 
 With `whisper` or `onnx` text is typed in chunks and when you release the key.
 Only one dictation process may run at a time.
+
+**Only my voice** (streaming backends; TUI → Speakers → "Dictate: only my voice"): dictation types only
+utterances that match an enrolled voice, after each pause. Each utterance needs a score of
+at least `dictate_speaker_threshold` (default 0.45; the "Match threshold" row in the Speakers menu changes it with ←/→
+in 0.05 steps, enter resets it, and the daemon restarts). Utterances too short to judge (under 1 s of audio
+including the pause) are not typed. Against 30 FLEURS Turkish speakers, other voices
+scored at most 0.38–0.42 on 1–3 s pieces, while an enrolled user on a laptop microphone
+scored 0.45–0.54. The daemon log shows every decision with its score
+(`[dictate] voice: … (score …)` / `ignored …`). Use it to tune the threshold for your
+room.
 
 **Async pipeline** (whisper/onnx): Transcription and injection run in the background. You can press the hotkey again immediately while the previous recording is still being transcribed.
 

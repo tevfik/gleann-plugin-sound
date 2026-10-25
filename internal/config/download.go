@@ -32,6 +32,7 @@ func AllAvailableModels() []WhisperModel {
 	all = append(all, AvailableModels()...)
 	all = append(all, AvailableONNXModels()...)
 	all = append(all, AvailableNemotronModels()...)
+	all = append(all, AvailableRefineModels()...)
 	return all
 }
 

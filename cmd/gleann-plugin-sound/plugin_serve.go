@@ -12,6 +12,7 @@ import (
 	"github.com/tevfik/gleann-plugin-sound/internal/core"
 	"github.com/tevfik/gleann-plugin-sound/internal/httpserver"
 	"github.com/tevfik/gleann-plugin-sound/internal/tcasr"
+	"github.com/tevfik/gleann-plugin-sound/internal/tui"
 )
 
 // newPluginServeCmd creates the "plugin-serve" subcommand.
@@ -121,6 +122,44 @@ Register this plugin with 'gleann-plugin-sound install' before use.`,
 		},
 	}
 
+	cmd.AddCommand(
+		&cobra.Command{
+			Use:   "enable",
+			Short: "Run the plugin server in the background and start it at login",
+			Long: `Registers the server with the OS (systemd user service, launchd agent or
+Windows logon task) using the settings in ~/.gleann/sound.json, and starts it now.
+Run it from the installed copy, not from a build directory.`,
+			RunE: func(cmd *cobra.Command, args []string) error {
+				if err := tui.EnableServe(tui.ServeArgs(config.Load())); err != nil {
+					return err
+				}
+				fmt.Printf("Plugin server enabled on :%d (starts at login).\n", tui.DefaultServePort)
+				return nil
+			},
+		},
+		&cobra.Command{
+			Use:   "disable",
+			Short: "Stop the background plugin server and remove it from login",
+			RunE: func(cmd *cobra.Command, args []string) error {
+				if err := tui.DisableServe(); err != nil {
+					return err
+				}
+				fmt.Println("Plugin server disabled.")
+				return nil
+			},
+		},
+		&cobra.Command{
+			Use:   "status",
+			Short: "Show whether the background plugin server is enabled",
+			RunE: func(cmd *cobra.Command, args []string) error {
+				if tui.ServeEnabled() {
+					fmt.Println("enabled")
+					return nil
+				}
+				return fmt.Errorf("disabled")
+			},
+		},
+	)
 	cmd.Flags().IntVar(&port, "port", 8767, "HTTP port for the plugin server")
 	cmd.Flags().String("host", "127.0.0.1",
 		"Address to listen on. Use 0.0.0.0 to accept phones/other machines (requires --token)")

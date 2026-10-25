@@ -224,7 +224,11 @@ func RunLive(ctx context.Context, stream core.LiveStream, vad core.VADProvider,
 		if err != nil {
 			return err
 		}
-		if s := strings.TrimSpace(u.Delta); s != "" || strings.TrimSpace(text.String()) != "" {
+		hasText := strings.TrimSpace(u.Delta) != "" || strings.TrimSpace(text.String()) != ""
+		// The live model sometimes returns nothing for a short utterance the
+		// refiner hears fine; the VAD heard speech, so let the refiner try.
+		refineAnyway := jobs != nil && len(uttPCM) >= SampleRate/2
+		if hasText || refineAnyway {
 			u.Delta = cfg.Corrector.Apply(u.Delta)
 			text.WriteString(u.Delta)
 			var who string

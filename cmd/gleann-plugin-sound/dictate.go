@@ -23,6 +23,7 @@ import (
 	"github.com/tevfik/gleann-plugin-sound/internal/hotkey"
 	"github.com/tevfik/gleann-plugin-sound/internal/keyboard"
 	"github.com/tevfik/gleann-plugin-sound/internal/pipeline"
+	"github.com/tevfik/gleann-plugin-sound/internal/speaker"
 	"github.com/tevfik/gleann-plugin-sound/internal/tcasr"
 )
 
@@ -277,6 +278,31 @@ func dictateLoopLive(
 		liveCfg.Refiner = refiner
 		typer = newRefinedTyper(injector.TypeText)
 	}
+	// "Only my voice" (Speakers menu): label every utterance and type only the
+	// ones that match an enrolled voice.
+	var gate *voiceGate
+	if cfg := config.Load(); cfg != nil && cfg.DictateSpeakerMatch {
+		labeler, closeLabeler, lerr := newSpeakerLabeler(false)
+		switch {
+		case lerr != nil:
+			log.Printf("[dictate] voice matching is on but unavailable (%v): typing every voice", lerr)
+		case labeler == nil:
+			log.Println("[dictate] voice matching is on but no voice is enrolled (Speakers menu): typing every voice")
+		default:
+			defer closeLabeler()
+			th := cfg.DictateThreshold()
+			if l, ok := labeler.(*speaker.Labeler); ok {
+				l.Threshold, l.MinSamples = th, dictateMinVoice
+			}
+			liveCfg.Speakers = labeler
+			log.Printf("[dictate] voice matching on (threshold %.2f): only enrolled voices are typed, after each pause", th)
+			if typer != nil {
+				typer.matchVoice = true
+			} else {
+				gate = &voiceGate{}
+			}
+		}
+	}
 
 	for {
 		log.Println("[dictate] waiting for hotkey press...")
@@ -288,6 +314,9 @@ func dictateLoopLive(
 		vad.Reset()
 		if typer != nil {
 			typer.reset()
+		}
+		if gate != nil {
+			gate.reset()
 		}
 
 		audioCh := make(chan []int16, 256)
@@ -320,6 +349,16 @@ func dictateLoopLive(
 			runErr = pipeline.RunLive(ctx, stream, vad, audioCh, sessionCfg, func(ev pipeline.LiveEvent) {
 				if typer != nil {
 					typer.Handle(ev)
+					return
+				}
+				if gate != nil {
+					if text := gate.Handle(ev); text != "" {
+						if err := injector.TypeText(text); err != nil {
+							log.Printf("[dictate] injection error: %v", err)
+							return
+						}
+						typed = true
+					}
 					return
 				}
 				if ev.Delta == "" {

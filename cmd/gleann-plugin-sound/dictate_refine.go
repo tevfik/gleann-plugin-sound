@@ -23,10 +23,15 @@ type refinedTyper struct {
 	mu      sync.Mutex
 	pending map[int]string // live text of utterances not refined yet
 	typed   bool
+
+	// matchVoice limits typing to enrolled voices (see voiceAccepted);
+	// rejected holds the utterances whose voice was refused.
+	matchVoice bool
+	rejected   map[int]bool
 }
 
 func newRefinedTyper(inject func(string) error) *refinedTyper {
-	return &refinedTyper{inject: inject, pending: map[int]string{}}
+	return &refinedTyper{inject: inject, pending: map[int]string{}, rejected: map[int]bool{}}
 }
 
 // Handle consumes one pipeline event; it is the OnLive callback.
@@ -36,8 +41,19 @@ func (r *refinedTyper) Handle(ev pipeline.LiveEvent) {
 	switch {
 	case ev.Refined:
 		delete(r.pending, ev.Seq)
+		if r.matchVoice && (r.rejected[ev.Seq] || !voiceAccepted(ev.Speaker)) {
+			return
+		}
 		r.typeLocked(ev.Text)
 	case ev.Final:
+		if r.matchVoice {
+			ok := voiceAccepted(ev.Speaker)
+			logVoice(ev, ok)
+			if !ok {
+				r.rejected[ev.Seq] = true
+				return
+			}
+		}
 		r.pending[ev.Seq] = ev.Text
 	}
 }
@@ -79,6 +95,7 @@ func (r *refinedTyper) reset() {
 	r.mu.Lock()
 	r.typed = false
 	r.pending = map[int]string{}
+	r.rejected = map[int]bool{}
 	r.mu.Unlock()
 }
 

@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/go-vgo/robotgo"
 	"github.com/tevfik/gleann-plugin-sound/internal/core"
@@ -29,6 +28,10 @@ type RobotGoInjector struct {
 	// avoids overwhelming the target application's input buffer and ensures
 	// that window managers / IMEs process each key event.
 	CharDelay time.Duration
+
+	// KeepControlKeys types newline and tab as Enter and Tab. Off by default:
+	// dictated text must never press Enter in the focused terminal.
+	KeepControlKeys bool
 }
 
 // Compile-time interface check.
@@ -72,34 +75,54 @@ func (k *RobotGoInjector) TypeText(text string) error {
 		return nil
 	}
 
+	clean := SanitizeText(text)
+	if !k.KeepControlKeys {
+		clean = FlattenWhitespace(clean)
+	}
+	if dropped := len([]rune(text)) - len([]rune(clean)); dropped > 0 {
+		log.Printf("[keyboard] sanitised input: %d character(s) removed or replaced", dropped)
+	}
+	if clean == "" {
+		return nil
+	}
+
 	// Pre-flight check: verify X11 display is reachable before calling
 	// robotgo's C code, which will SIGSEGV if the display can't be opened.
 	if err := checkDisplay(); err != nil {
 		return fmt.Errorf("keyboard: %w", err)
 	}
 
-	log.Printf("[keyboard] injecting %d chars", len([]rune(text)))
+	log.Printf("[keyboard] injecting %d chars", len([]rune(clean)))
 
-	for _, r := range text {
+	// The push-to-talk hotkey is usually still held while words are typed.
+	// Typed with Ctrl+Shift down, every letter becomes a terminal shortcut
+	// (Ctrl+Shift+W closes the tab, Ctrl+Shift+Q the window), so release the
+	// modifiers first. The physical release later is harmless.
+	releaseModifiers()
+
+	// Type each word in a single robotgo call: typing rune by rune with a
+	// 5 ms gap raced with X11 keymap remapping for characters (ç ğ ı ş …)
+	// that have no key of their own, producing wrong or missing letters.
+	for _, run := range splitRuns(clean) {
 		var err error
 
-		switch {
-		case r == '\n':
+		switch run {
+		case "\n":
 			err = robotgo.KeyTap("enter")
-		case r == '\t':
+		case "\t":
 			err = robotgo.KeyTap("tab")
-		case r == ' ':
+		case " ":
 			err = robotgo.KeyTap("space")
-		case unicode.IsPrint(r):
-			// robotgo.TypeStr handles Unicode including shifted characters.
-			robotgo.TypeStr(string(r))
 		default:
-			// Non-printable / control characters — skip silently.
-			continue
+			robotgo.TypeStr(run)
+			if !isASCII(run) {
+				// let the target application finish the keymap remap
+				time.Sleep(10 * time.Millisecond)
+			}
 		}
 
 		if err != nil {
-			return fmt.Errorf("keyboard: failed to inject rune %q: %w", r, err)
+			return fmt.Errorf("keyboard: failed to inject %q: %w", run, err)
 		}
 
 		if k.CharDelay > 0 {
@@ -108,4 +131,13 @@ func (k *RobotGoInjector) TypeText(text string) error {
 	}
 
 	return nil
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }

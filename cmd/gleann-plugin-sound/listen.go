@@ -257,6 +257,9 @@ Press Ctrl+C to stop.`,
 						}
 						return
 					}
+					if ev.Text == "" { // live model heard nothing; only the refined line follows
+						return
+					}
 					writeResult(core.StreamResult{Text: ev.Text, Start: ev.Start, End: ev.End, IsFinal: true, WindowSeq: ev.Seq + 1}, ev.Speaker)
 				})
 			} else {

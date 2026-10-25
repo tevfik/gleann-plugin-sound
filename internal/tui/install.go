@@ -422,9 +422,9 @@ func installDaemon() error {
 		return fmt.Errorf("binary %s not found: %w", binPath, err)
 	}
 
-	// The dictate command reads from config automatically.
-	// We only pass --verbose for daemon logging.
-	args := []string{"dictate", "--verbose"}
+	// The dictate command reads from config automatically. No --verbose: it
+	// logs the keys held at every hotkey press into the journal.
+	args := []string{"dictate"}
 
 	switch runtime.GOOS {
 	case "linux":
@@ -446,6 +446,26 @@ func RemoveDaemon() error { return removeDaemon() }
 
 // DaemonRunning reports whether the dictate daemon is active.
 func DaemonRunning() bool { return isDaemonRunning() }
+
+// RestartDaemon restarts a running dictate daemon so it rereads sound.json.
+// It does nothing (and returns false) when the daemon is not running.
+func RestartDaemon() (bool, error) {
+	if !isDaemonRunning() {
+		return false, nil
+	}
+	var err error
+	switch runtime.GOOS {
+	case "linux":
+		err = exec.Command("systemctl", "--user", "restart", "gleann-plugin-sound-dictate.service").Run()
+	case "darwin":
+		err = exec.Command("launchctl", "kickstart", "-k",
+			fmt.Sprintf("gui/%d/com.gleann.sound.dictate", os.Getuid())).Run()
+	case "windows":
+		_ = exec.Command("schtasks", "/End", "/TN", "gleann-plugin-sound-dictate").Run()
+		err = exec.Command("schtasks", "/Run", "/TN", "gleann-plugin-sound-dictate").Run()
+	}
+	return err == nil, err
+}
 
 func removeDaemon() error {
 	switch runtime.GOOS {

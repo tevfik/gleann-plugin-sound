@@ -61,3 +61,18 @@ func TestDBBar(t *testing.T) {
 		t.Errorf("full bar = %q", got)
 	}
 }
+
+func TestWrapText(t *testing.T) {
+	lines := wrapText(speaker.ReadingText("tr"), 72)
+	if len(lines) < 3 {
+		t.Fatalf("expected the text to wrap, got %d line(s)", len(lines))
+	}
+	for _, l := range lines {
+		if n := len([]rune(l)); n > 72 {
+			t.Errorf("line of %d runes exceeds 72: %q", n, l)
+		}
+	}
+	if got := strings.Join(lines, " "); got != speaker.ReadingText("tr") {
+		t.Errorf("wrapping changed the text: %q", got)
+	}
+}

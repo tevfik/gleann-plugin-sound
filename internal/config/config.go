@@ -45,6 +45,17 @@ type Config struct {
 	SpeakerModel     string  `json:"speaker_model,omitempty"`
 	SpeakerThreshold float64 `json:"speaker_threshold,omitempty"`
 
+	// DictateSpeakerMatch makes dictation type only speech that matches an
+	// enrolled voice (set from the Speakers menu). Words then appear when the
+	// speaker pauses, not as they are spoken, because the voice can only be
+	// judged on a whole utterance.
+	DictateSpeakerMatch bool `json:"dictate_speaker_match,omitempty"`
+	// DictateSpeakerThreshold is the cosine an utterance must reach to be
+	// typed in that mode (default DefaultDictateSpeakerThreshold). It is
+	// stricter than SpeakerThreshold: a stranger's words typed into your
+	// window cost more than a missed label in a transcript.
+	DictateSpeakerThreshold float64 `json:"dictate_speaker_threshold,omitempty"`
+
 	// Corrections rewrites words the recogniser gets systematically wrong
 	// (names, jargon): {"gılan": "gleann"}. Keys with spaces match phrases.
 	Corrections map[string]string `json:"corrections,omitempty"`
@@ -206,6 +217,38 @@ func AvailableNemotronModels() []WhisperModel {
 	}
 }
 
+// AvailableRefineModels returns the GGUF models that re-transcribe each
+// finished utterance (refine_model). Qwen3-ASR-1.7B Q8 measured 11.95 % WER on
+// FLEURS Turkish against 16.5 % for live Nemotron, and 17 % against 39 % on
+// conversational TEDx speech (README, "Meeting pipeline"). It runs in the
+// gleann-asr-helper sidecar, like the tc backend.
+func AvailableRefineModels() []WhisperModel {
+	return []WhisperModel{
+		{
+			Name:         RecommendedRefineModel,
+			DisplayName:  "[Refiner] Qwen3-ASR-1.7B Q8 GGUF — most accurate, checks each utterance — ~2.2 GB",
+			FileName:     "Qwen3-ASR-1.7B-Q8_0.gguf",
+			Size:         "2.2 GB",
+			Multilingual: true,
+			URL:          "https://huggingface.co/handy-computer/Qwen3-ASR-1.7B-gguf/resolve/main/Qwen3-ASR-1.7B-Q8_0.gguf",
+		},
+	}
+}
+
+// RecommendedRefineModel is the catalog name of the recommended refiner.
+const RecommendedRefineModel = "qwen3-asr-1.7b-q8-gguf"
+
+// IsRefineModel reports whether a catalog name is a refiner, not a live or
+// batch transcription model.
+func IsRefineModel(name string) bool {
+	for _, m := range AvailableRefineModels() {
+		if m.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // DefaultDir returns the gleann config directory: ~/.gleann
 func DefaultDir() string {
 	home, _ := os.UserHomeDir()
@@ -322,4 +365,17 @@ func SileroVADPath() string {
 // IsSileroVADDownloaded checks if the Silero VAD model is available.
 func IsSileroVADDownloaded() bool {
 	return IsModelDownloaded("silero_vad.onnx")
+}
+
+// DefaultDictateSpeakerThreshold: measured against 30 FLEURS Turkish speakers,
+// other voices reached at most 0.38-0.42 against an enrolled profile (1-3 s
+// pieces), the enrolled user 0.45-0.54 on a laptop microphone.
+const DefaultDictateSpeakerThreshold = 0.45
+
+// DictateThreshold returns the voice-match threshold dictation uses.
+func (c *Config) DictateThreshold() float64 {
+	if c != nil && c.DictateSpeakerThreshold > 0 {
+		return c.DictateSpeakerThreshold
+	}
+	return DefaultDictateSpeakerThreshold
 }

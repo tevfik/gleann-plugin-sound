@@ -14,8 +14,8 @@ import (
 // ── Wizard phases ──────────────────────────────────────────────
 //
 // Onboarding order:
-//   models → download → backend → exec provider → default model →
-//   language → hotkey → output → audio source → summary
+//   preset → models → download → backend → exec provider → default model →
+//   language → refine model → hotkey → output → audio source → summary
 //
 // Reconfiguration (cfg.Completed):
 //   overview → (jump to any phase) → overview
@@ -35,11 +35,14 @@ const (
 	phaseOutput                              // output directory for transcriptions
 	phaseAudioSource                         // audio source selection (mic / speaker / both)
 	phaseSummary                             // summary & confirm
+	phasePreset                              // recommended / lightweight / custom (fresh setup)
+	phaseRefine                              // refine model (accuracy), live backends only
 )
 
 // onboardingOrder defines the sequential phase order for first-time setup.
 // Used by nextPhase/prevPhase to navigate the wizard.
 var onboardingOrder = []setupPhase{
+	phasePreset,
 	phaseModelSelect,
 	phaseDownloading,
 	phaseBackend,
@@ -47,6 +50,7 @@ var onboardingOrder = []setupPhase{
 	phasePipInstall,
 	phaseDefaultModel,
 	phaseLanguage,
+	phaseRefine,
 	phaseHotkey,
 	phaseOutput,
 	phaseAudioSource,
@@ -87,6 +91,7 @@ var overviewItems = []overviewItem{
 	{"Execution Provider", phaseExecutionProvider},
 	{"Default Model", phaseDefaultModel},
 	{"Language", phaseLanguage},
+	{"Refine Model", phaseRefine},
 	{"Dictation Hotkey", phaseHotkey},
 	{"Output Directory", phaseOutput},
 	{"Audio Source", phaseAudioSource},
@@ -160,6 +165,24 @@ type SetupModel struct {
 	audioSourceOptions []string // available sources (mic, speaker, both)
 	audioSourceCursor  int      // cursor position
 
+	// Preset (fresh setup).
+	presetCursor int
+
+	// Refine model ("" = off).
+	refinePath   string
+	refineCursor int
+	refineCustom bool   // typing a path
+	refineInput  string // custom path buffer
+	refineErr    string
+
+	// afterDownload, when set, is the phase to return to once a download
+	// started from that phase (the refine step) has finished.
+	afterDownload setupPhase
+
+	// base is the configuration the wizard started from; settings it does not
+	// edit (corrections, speaker options, install state…) are kept on save.
+	base *config.Config
+
 	// Result.
 	result *config.Config
 }
@@ -211,6 +234,8 @@ func NewSetupModel(existingCfg *config.Config) SetupModel {
 	available = append(available, config.AvailableONNXModels()...)
 	// Append Nemotron ASR models.
 	available = append(available, config.AvailableNemotronModels()...)
+	// Append the refine models (accuracy pass).
+	available = append(available, config.AvailableRefineModels()...)
 	// Append Silero VAD as a downloadable model option.
 	available = append(available, config.SileroVADModel())
 
@@ -284,7 +309,7 @@ func NewSetupModel(existingCfg *config.Config) SetupModel {
 
 	}
 
-	startPhase := setupPhase(phaseModelSelect)
+	startPhase := setupPhase(phasePreset)
 	if isReconfigure {
 		startPhase = phaseOverview
 	}
@@ -310,7 +335,15 @@ func NewSetupModel(existingCfg *config.Config) SetupModel {
 		outputDir:            outputDir,
 		audioSourceOptions:   []string{"mic", "speaker", "both"},
 		audioSourceCursor:    audioSourceCursor,
+		base:                 existingCfg,
 	}
+	if existingCfg != nil && existingCfg.RefineModel != "" {
+		m.refinePath = config.ExpandPath(existingCfg.RefineModel)
+	}
+	if existingCfg == nil {
+		m.setLanguage(systemLanguage())
+	}
+	m.prefillRefineCursor()
 
 	// In reconfigure mode, pre-populate installed models from config.
 	if isReconfigure && existingCfg != nil && len(existingCfg.Models) > 0 {
@@ -384,6 +417,13 @@ func (m *SetupModel) advanceOnboarding() {
 			next = onboardingOrder[idx+1]
 		}
 	}
+	// The refiner only serves the live backends.
+	if next == phaseRefine && !m.refineApplies() {
+		next = phaseHotkey
+	}
+	if next == phaseRefine {
+		m.prefillRefineCursor()
+	}
 	m.phase = next
 }
 
@@ -426,6 +466,9 @@ func (m *SetupModel) goBackOnboarding() bool {
 				break
 			}
 		}
+	}
+	if prev == phaseRefine && !m.refineApplies() {
+		prev = phaseLanguage
 	}
 	m.phase = prev
 	return true
@@ -491,6 +534,18 @@ func (m SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.installedModels = append(m.installedModels, entry)
 			}
+		}
+		// A download started from the refine step returns there.
+		if m.afterDownload != 0 && len(m.downloadQ) == 0 {
+			back := m.afterDownload
+			m.afterDownload = 0
+			if msg.err != nil {
+				m.refinePath = ""
+			}
+			m.downloading = ""
+			m.phase = back
+			m.prefillRefineCursor()
+			return m, nil
 		}
 		// Download next in queue.
 		if len(m.downloadQ) > 0 {
@@ -567,6 +622,10 @@ func (m SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.outputEditing = false
 				return m, nil
 			}
+			if m.phase == phaseRefine && m.refineCustom {
+				m.refineCustom = false
+				return m, nil
+			}
 			// Overview: esc quits.
 			if m.phase == phaseOverview {
 				m.cancelled = true
@@ -608,6 +667,10 @@ func (m SetupModel) handlePhaseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updateAudioSource(msg)
 	case phaseSummary:
 		return m.updateSummary(msg)
+	case phasePreset:
+		return m.updatePreset(msg)
+	case phaseRefine:
+		return m.updateRefine(msg)
 	}
 	return m, nil
 }
@@ -634,6 +697,9 @@ func (m SetupModel) updateOverview(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.returnPhase = phaseOverview
 		m.phase = item.phase
+		if item.phase == phaseRefine {
+			m.prefillRefineCursor()
+		}
 	}
 	return m, nil
 }
@@ -1070,16 +1136,22 @@ func (m SetupModel) buildConfig() *config.Config {
 
 	backend := m.backendOptions[m.backendCursor]
 
-	cfg := &config.Config{
-		DefaultModel: defaultModel,
-		Language:     lang,
-		Hotkey:       hotkey,
-		Models:       m.installedModels,
-		Backend:      backend,
-		AudioSource:  m.audioSourceOptions[m.audioSourceCursor],
-		OutputDir:    m.outputDir,
-		Completed:    true,
+	// Start from the existing configuration so settings this wizard does not
+	// edit (corrections, speaker options, install state…) survive a save.
+	cfg := &config.Config{}
+	if m.base != nil {
+		*cfg = *m.base
 	}
+	cfg.DefaultModel = defaultModel
+	cfg.Language = lang
+	cfg.Hotkey = hotkey
+	cfg.Models = m.installedModels
+	cfg.Backend = backend
+	cfg.AudioSource = m.audioSourceOptions[m.audioSourceCursor]
+	cfg.OutputDir = m.outputDir
+	cfg.RefineModel = m.refinePath
+	cfg.Completed = true
+	cfg.ExecutionProvider = ""
 	if backend == "onnx" || backend == "nemotron" {
 		cfg.ExecutionProvider = m.providerOptions[m.providerCursor]
 	}
@@ -1151,6 +1223,10 @@ func (m SetupModel) View() string {
 		b.WriteString(m.viewAudioSource())
 	case phaseSummary:
 		b.WriteString(m.viewSummary())
+	case phasePreset:
+		b.WriteString(m.viewPreset())
+	case phaseRefine:
+		b.WriteString(m.viewRefine())
 	}
 
 	return b.String()
@@ -1243,6 +1319,9 @@ func (m SetupModel) overviewValues() map[setupPhase]string {
 	} else {
 		vals[phaseLanguage] = "auto-detect"
 	}
+
+	// Refine model
+	vals[phaseRefine] = m.refineSummary()
 
 	// Hotkey
 	vals[phaseHotkey] = m.selectedHotkey()
@@ -1659,6 +1738,7 @@ func (m SetupModel) viewSummary() string {
 	items := []struct{ k, v string }{
 		{"Default Model", defaultModel},
 		{"Language", lang},
+		{"Refine Model", m.refineSummary()},
 		{"Dictation Hotkey", hotkey},
 		{"Backend", backend},
 	}

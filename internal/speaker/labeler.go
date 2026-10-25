@@ -35,6 +35,9 @@ type Labeler struct {
 	ClusterThreshold float64
 	// Prefix names fallback speakers (default "Speaker").
 	Prefix string
+	// MinSamples is the shortest audio judged (default 2 s); shorter audio
+	// gets the empty name.
+	MinSamples int
 
 	mu      sync.Mutex
 	centres [][]float64
@@ -43,7 +46,11 @@ type Labeler struct {
 
 // Label implements core.SpeakerLabeler.
 func (l *Labeler) Label(pcm []int16) (string, float64) {
-	if len(pcm) < 2*sampleRate { // under ~2 s a voice print is a guess
+	min := l.MinSamples
+	if min <= 0 {
+		min = 2 * sampleRate // under ~2 s a voice print is a guess
+	}
+	if len(pcm) < min {
 		return "", 0
 	}
 	v, err := l.Emb.Embed(pcm)

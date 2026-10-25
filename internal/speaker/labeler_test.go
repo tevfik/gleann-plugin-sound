@@ -53,6 +53,18 @@ func TestLabelerWithEnrolledVoices(t *testing.T) {
 	if name, _ := l.Label(make([]int16, sampleRate)); name != "" {
 		t.Errorf("1 s of audio must not be labelled, got %q", name)
 	}
+
+	// Dictation judges shorter audio, with a stricter threshold.
+	l.MinSamples = sampleRate
+	short := make([]int16, sampleRate)
+	short[0] = 2
+	if name, _ := l.Label(short); name != "Mehmet" {
+		t.Errorf("1 s with MinSamples 1 s labelled %q", name)
+	}
+	l.Threshold = 0.999 // Ayşe's clip scores 0.995
+	if name, _ := l.Label(clip(1)); name != UnknownName {
+		t.Errorf("a voice slightly off its profile passed a strict threshold: %q", name)
+	}
 }
 
 func TestLabelerFallbackNumbersVoices(t *testing.T) {

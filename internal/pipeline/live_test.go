@@ -231,6 +231,44 @@ func TestRunLive_RefinesEachUtterance(t *testing.T) {
 	}
 }
 
+// silentStream never recognises a word, like the live model on some short
+// utterances.
+type silentStream struct{}
+
+func (silentStream) Accept(context.Context, []int16) (core.LiveUpdate, error) {
+	return core.LiveUpdate{}, nil
+}
+func (silentStream) Flush(context.Context) (core.LiveUpdate, error) { return core.LiveUpdate{}, nil }
+func (silentStream) Reset()                                         {}
+func (silentStream) Close() error                                   { return nil }
+
+func TestRunLive_RefinesWhenLiveModelHeardNothing(t *testing.T) {
+	ref := &fakeRefiner{}
+	cfg := DefaultLiveConfig()
+	cfg.Refiner = ref
+	cfg.Speakers = &fakeLabeler{}
+	evs := run(t, silentStream{}, cfg, quiet(300), tone(2500), quiet(1000))
+	var refined []LiveEvent
+	for _, e := range evs {
+		if e.Refined {
+			refined = append(refined, e)
+		}
+	}
+	if len(refined) != 1 || refined[0].Text != "refined-1" {
+		t.Fatalf("speech the live model missed was not refined: %+v", evs)
+	}
+	// The final still comes first and carries the speaker, so voice matching
+	// can judge the utterance.
+	if fin := finals(evs); len(fin) != 1 || fin[0].Text != "" || fin[0].Speaker == "" {
+		t.Errorf("final: %+v", fin)
+	}
+
+	// Without a refiner an empty utterance stays silent.
+	if evs := run(t, silentStream{}, DefaultLiveConfig(), tone(2500), quiet(1000)); len(finals(evs)) != 0 {
+		t.Errorf("empty final without a refiner: %+v", evs)
+	}
+}
+
 type fakeLabeler struct{ calls int }
 
 func (f *fakeLabeler) Label(pcm []int16) (string, float64) {

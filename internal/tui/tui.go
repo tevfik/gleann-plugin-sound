@@ -39,7 +39,7 @@ func Run() error {
 		case ScreenListen:
 			runCLIMode(h.Config(), "listen")
 		case ScreenServe:
-			runCLIMode(h.Config(), "plugin-serve")
+			runServeToggle(h.Config())
 		case ScreenDaemonToggle:
 			runDaemonToggle()
 		case ScreenInstall:

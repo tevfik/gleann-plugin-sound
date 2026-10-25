@@ -45,12 +45,11 @@ where you will record meetings, with nobody else talking and no TV or music on.
 					lang = cfg.Language
 				}
 			}
-			fmt.Printf("Recording %d s for %q. Read this aloud, naturally:\n\n  %s\n\n", seconds, name, speaker.ReadingText(lang))
 			for i := 3; i > 0; i-- {
-				fmt.Printf("\rStarting in %d... ", i)
+				drawRecordScreen(name, lang, seconds, fmt.Sprintf("Starting in %d... ", i))
 				time.Sleep(time.Second)
 			}
-			fmt.Print("\r\033[2KRecording\n")
+			drawRecordScreen(name, lang, seconds, "")
 
 			pcm, err := recordMic(cmd.Context(), time.Duration(seconds)*time.Second)
 			if err != nil {
@@ -66,6 +65,39 @@ where you will record meetings, with nobody else talking and no TV or music on.
 	cmd.Flags().IntVar(&seconds, "seconds", 25, "how long to record")
 	cmd.Flags().IntVar(&maxWindows, "windows", 12, "use at most this many 5 s windows")
 	return cmd
+}
+
+// drawRecordScreen clears the terminal and shows the text to read, so it stays
+// visible for the whole recording; the status line (countdown, then the level
+// bar) is the last line and the only one redrawn afterwards.
+func drawRecordScreen(name, lang string, seconds int, status string) {
+	fmt.Print("\033[2J\033[H")
+	fmt.Printf("Recording %d s for %q. Read this aloud, naturally:\n\n", seconds, name)
+	for _, line := range wrapText(speaker.ReadingText(lang), 72) {
+		fmt.Printf("  %s\n", line)
+	}
+	fmt.Print("\n" + status)
+}
+
+// wrapText breaks s into lines of at most width runes at word boundaries.
+func wrapText(s string, width int) []string {
+	var lines []string
+	cur := ""
+	for _, w := range strings.Fields(s) {
+		if cur != "" && len([]rune(cur))+1+len([]rune(w)) > width {
+			lines = append(lines, cur)
+			cur = w
+			continue
+		}
+		if cur != "" {
+			cur += " "
+		}
+		cur += w
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	return lines
 }
 
 // recordMic captures d of microphone audio, drawing a level bar meanwhile.

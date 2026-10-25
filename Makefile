@@ -17,7 +17,7 @@ WHISPER_DIR ?= $(HOME)/whisper.cpp
 CGO_CFLAGS  := -I$(WHISPER_DIR)/include -I$(WHISPER_DIR)/ggml/include
 CGO_LDFLAGS := -L$(WHISPER_DIR)/build/src -L$(WHISPER_DIR)/build/ggml/src -Wl,-rpath,$(WHISPER_DIR)/build/src -Wl,-rpath,$(WHISPER_DIR)/build/ggml/src -Wl,-rpath,'$$ORIGIN' -lwhisper -lggml -lggml-cpu -lggml-base -lm -lstdc++ -lpthread -lgomp
 
-.PHONY: asr-helper all build build-onnx build-all build-stub clean test lint run-dictate run-dictate-nemotron whisper-setup whisper-model onnx-model silero-model install setup-input release
+.PHONY: asr-helper all build build-onnx build-all build-stub clean test lint run-dictate run-dictate-nemotron whisper-setup whisper-model onnx-model silero-model install install-user uninstall setup-input release
 
 # ─── Sidecar for the "tc" backend and the Qwen3-ASR refiner ──────────
 # Builds transcribe.cpp and the helper; see native/asr-helper/build.sh.
@@ -176,14 +176,27 @@ lint:
 clean:
 	rm -rf $(BUILD_DIR) coverage.out
 
-# ─── Install with proper permissions ──────────────────────────────────
-# Copies the binary to /usr/local/bin and creates a udev rule so that
-# keyboard devices are accessible to logged-in users (via "uaccess" tag).
-# This eliminates the need for sudo or manual 'input' group membership.
-INSTALL_DIR ?= /usr/local/bin
-install: build
+# ─── Install ──────────────────────────────────────────────────────────
+# Installs the whisper + ONNX build (speaker identification needs ONNX).
+# The binary is written to a temp name and renamed so a running dictate
+# daemon does not block the upgrade ("text file busy").
+INSTALL_DIR  ?= /usr/local/bin
+USER_BIN_DIR ?= $(HOME)/.local/bin
+
+# install-user — build and install to ~/.local/bin (no sudo)
+install-user: build-all
+	@mkdir -p $(USER_BIN_DIR)
+	install -m 0755 $(BUILD_DIR)/$(BINARY) $(USER_BIN_DIR)/$(BINARY).new
+	mv -f $(USER_BIN_DIR)/$(BINARY).new $(USER_BIN_DIR)/$(BINARY)
+	@echo "✅ Installed $(BINARY) → $(USER_BIN_DIR)/$(BINARY)"
+	@echo "   Make sure $(USER_BIN_DIR) is in your PATH; restart a running 'dictate' to use it."
+
+# install — system-wide (needs sudo): binary to /usr/local/bin plus a udev rule
+# so keyboard devices are accessible to logged-in users (via "uaccess" tag).
+install: build-all
 	@echo "==> Installing $(BINARY) to $(INSTALL_DIR)..."
-	sudo install -m 0755 $(BUILD_DIR)/$(BINARY) $(INSTALL_DIR)/$(BINARY)
+	sudo install -m 0755 $(BUILD_DIR)/$(BINARY) $(INSTALL_DIR)/$(BINARY).new
+	sudo mv -f $(INSTALL_DIR)/$(BINARY).new $(INSTALL_DIR)/$(BINARY)
 	@echo "==> Creating udev rule for input device access..."
 	@echo 'KERNEL=="event*", SUBSYSTEM=="input", MODE="0660", GROUP="input", TAG+="uaccess"' \
 		| sudo tee /etc/udev/rules.d/99-gleann-plugin-sound-input.rules > /dev/null
@@ -191,12 +204,15 @@ install: build
 	@sudo udevadm trigger --subsystem-match=input
 	@echo "==> Adding $(USER) to 'input' group..."
 	@sudo usermod -aG input $(USER) 2>/dev/null || true
-	@echo ""
-	@echo "✓ Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY)"
-	@echo "✓ udev rule created — keyboard devices now accessible to logged-in users"
-	@echo "✓ User '$(USER)' added to 'input' group"
-	@echo ""
+	@echo "✅ Installed $(BINARY) → $(INSTALL_DIR)/$(BINARY)"
+	@echo "✅ udev rule created, user '$(USER)' added to 'input' group"
 	@echo "NOTE: Log out and back in (or run: sg input -c \"gleann-plugin-sound ...\") to activate."
+
+# uninstall — remove both the user and the system-wide binary
+uninstall:
+	rm -f $(USER_BIN_DIR)/$(BINARY)
+	@if [ -f $(INSTALL_DIR)/$(BINARY) ]; then sudo rm -f $(INSTALL_DIR)/$(BINARY); fi
+	@echo "✅ Removed $(BINARY)"
 
 # ─── Setup input group only (no install) ──────────────────────────────
 setup-input:

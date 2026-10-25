@@ -72,9 +72,21 @@ func TestSetupModelInit(t *testing.T) {
 	if m.Done() {
 		t.Error("new SetupModel should not be done")
 	}
-	if m.phase != phaseModelSelect {
-		t.Errorf("initial phase = %v, want phaseModelSelect", m.phase)
+	if m.phase != phasePreset {
+		t.Errorf("initial phase = %v, want phasePreset", m.phase)
 	}
+}
+
+// pastPreset picks the "Custom" preset, landing on the model list unchanged.
+func pastPreset(t *testing.T, m SetupModel) SetupModel {
+	t.Helper()
+	m.presetCursor = len(setupPresets) - 1
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	sm := updated.(SetupModel)
+	if sm.phase != phaseModelSelect {
+		t.Fatalf("after the preset phase = %v, want phaseModelSelect", sm.phase)
+	}
+	return sm
 }
 
 func TestSetupModelWithExistingConfig(t *testing.T) {
@@ -105,7 +117,7 @@ func TestSetupModelCancel(t *testing.T) {
 }
 
 func TestSetupModelNavigation(t *testing.T) {
-	m := NewSetupModel(nil)
+	m := pastPreset(t, NewSetupModel(nil))
 
 	// Navigate model list.
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
@@ -122,7 +134,7 @@ func TestSetupModelNavigation(t *testing.T) {
 }
 
 func TestSetupModelToggle(t *testing.T) {
-	m := NewSetupModel(nil)
+	m := pastPreset(t, NewSetupModel(nil))
 
 	// Toggle first model.
 	wasSel := m.selected[0]
