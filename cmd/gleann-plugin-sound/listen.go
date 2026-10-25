@@ -58,6 +58,12 @@ Press Ctrl+C to stop.`,
 				}
 			}
 
+			resolved, err := resolveModelPath(modelPath)
+			if err != nil {
+				return fmt.Errorf("model not found: %w (check ~/.gleann/models or run 'gleann-plugin-sound setup')", err)
+			}
+			modelPath = resolved
+
 			log.Println("[listen] initialising...")
 
 			// ── Initialise transcription engine ───────────────────

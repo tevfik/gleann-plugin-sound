@@ -259,15 +259,19 @@ func TestHomeModelPreSetup(t *testing.T) {
 }
 
 func TestHomeModelPostSetup(t *testing.T) {
-	// With completed config, should show full menu.
+	// With completed config, should show full menu (11 items including Daemon toggle).
 	cfg := &config.Config{Completed: true, DefaultModel: "test", Language: "tr", Hotkey: "ctrl+space"}
 	m := NewHomeModelWithConfig(cfg)
-	if len(m.items) != 10 {
-		t.Errorf("post-setup menu items = %d, want 10", len(m.items))
+	if len(m.items) != 11 {
+		t.Errorf("post-setup menu items = %d, want 11", len(m.items))
 	}
 	// First should be Dictate.
 	if m.items[0].title != "Dictate" {
 		t.Errorf("first item = %q, want Dictate", m.items[0].title)
+	}
+	// 4th item should be Daemon toggle.
+	if m.items[3].screen != ScreenDaemonToggle {
+		t.Errorf("4th item screen = %v, want ScreenDaemonToggle", m.items[3].screen)
 	}
 	// Config should be accessible.
 	if m.Config() == nil {
@@ -275,6 +279,24 @@ func TestHomeModelPostSetup(t *testing.T) {
 	}
 	if m.Config().Language != "tr" {
 		t.Errorf("Config().Language = %q, want tr", m.Config().Language)
+	}
+}
+
+func TestHomeModelSelectDaemon(t *testing.T) {
+	cfg := &config.Config{Completed: true}
+	m := NewHomeModelWithConfig(cfg)
+	// Navigate down 3 times to Daemon item.
+	for i := 0; i < 3; i++ {
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		m = updated.(HomeModel)
+	}
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	h := updated.(HomeModel)
+	if h.Chosen() != ScreenDaemonToggle {
+		t.Errorf("chosen = %v, want ScreenDaemonToggle", h.Chosen())
+	}
+	if cmd == nil {
+		t.Error("enter should return a command")
 	}
 }
 

@@ -40,6 +40,8 @@ func Run() error {
 			runCLIMode(h.Config(), "listen")
 		case ScreenServe:
 			runCLIMode(h.Config(), "plugin-serve")
+		case ScreenDaemonToggle:
+			runDaemonToggle()
 		case ScreenInstall:
 			if err := runInstall(); err != nil {
 				return err
@@ -198,6 +200,30 @@ func runCLIMode(cfg *config.Config, mode string) {
 	_ = cmd.Run()
 
 	// Wait for user to acknowledge before returning to TUI.
+	fmt.Println("\nPress enter to return to menu...")
+	buf := make([]byte, 1)
+	_, _ = os.Stdin.Read(buf)
+}
+
+func runDaemonToggle() {
+	fmt.Println()
+	if isDaemonRunning() {
+		fmt.Println("⏹  Stopping and removing dictate background daemon...")
+		if err := removeDaemon(); err != nil {
+			fmt.Printf("✗ Error: %v\n", err)
+		} else {
+			fmt.Println("✓ Dictate background daemon stopped and disabled.")
+		}
+	} else {
+		fmt.Println("🚀 Installing and starting dictate background daemon...")
+		if err := installDaemon(); err != nil {
+			fmt.Printf("✗ Error: %v\n", err)
+		} else {
+			fmt.Println("✓ Dictate background daemon installed and started.")
+			fmt.Println("  Push-to-talk hotkey is now active system-wide at login.")
+			fmt.Println("  Logs: journalctl --user -u gleann-plugin-sound-dictate -f")
+		}
+	}
 	fmt.Println("\nPress enter to return to menu...")
 	buf := make([]byte, 1)
 	_, _ = os.Stdin.Read(buf)

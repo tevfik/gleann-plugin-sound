@@ -8,11 +8,11 @@ import (
 )
 
 const (
-	sampleRate   = 16000
-	nFFT         = 512
-	windowLength = 400
-	hopLength    = 160
-	nMels        = 128
+	sampleRate    = 16000
+	nFFT          = 512
+	windowLength  = 400
+	hopLength     = 160
+	nMels         = 128
 	fftPaddedSize = 512
 )
 

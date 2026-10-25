@@ -25,7 +25,7 @@ if [ ! -f "$src/include/transcribe.h" ]; then
 fi
 
 echo "==> building transcribe.cpp (CPU, native)"
-cmake -S "$src" -B "$src/build" -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE="${GGML_NATIVE:-ON}" ${CMAKE_EXTRA:-} >/dev/null
+cmake -S "$src" -B "$src/build" -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE="${GGML_NATIVE:-ON}" -DGGML_BF16=OFF ${CMAKE_EXTRA:-} >/dev/null
 cmake --build "$src/build" -j"$(nproc)" --target transcribe >/dev/null
 
 echo "==> linking gleann-asr-helper"

@@ -35,7 +35,7 @@ import (
 
 // PluginVersion is reported by /info and compared by `update`. main replaces
 // it with the release tag stamped in by -ldflags "-X main.version=...".
-var PluginVersion = "0.2.0"
+var PluginVersion = "1.0.0"
 
 const (
 	// PluginName is the registry name.

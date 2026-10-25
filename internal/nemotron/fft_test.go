@@ -70,7 +70,7 @@ func TestFFT_MatchesNaiveDFT(t *testing.T) {
 	imag := make([]float64, n)
 	for i := 0; i < n; i++ {
 		real[i] = math.Sin(float64(i)*0.3) + math.Cos(float64(i)*0.7)
-		imag[i] = math.Sin(float64(i)*0.5)
+		imag[i] = math.Sin(float64(i) * 0.5)
 	}
 
 	refR, refI := naiveDFT(real, imag, n)

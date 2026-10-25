@@ -68,12 +68,12 @@ func TestTranscriptionHandler_Callable(t *testing.T) {
 
 // mockTranscriber is a test double for core.Transcriber.
 type mockTranscriber struct {
-	closed        bool
-	lastPCMLen    int
-	lastFilePath  string
-	returnText    string
+	closed         bool
+	lastPCMLen     int
+	lastFilePath   string
+	returnText     string
 	returnSegments []Segment
-	returnErr     error
+	returnErr      error
 }
 
 func (m *mockTranscriber) TranscribeStream(_ context.Context, pcmData []int16) (string, error) {

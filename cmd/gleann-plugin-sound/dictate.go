@@ -95,6 +95,11 @@ Press Ctrl+C to exit.`,
 			if modelPath == "" {
 				return fmt.Errorf("no model specified: use --model flag or run TUI setup")
 			}
+			resolved, err := resolveModelPath(modelPath)
+			if err != nil {
+				return fmt.Errorf("model not found: %w (check ~/.gleann/models or run 'gleann-plugin-sound setup')", err)
+			}
+			modelPath = resolved
 
 			releaseLock, lockErr := acquireDictateLock()
 			if lockErr != nil {

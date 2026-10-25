@@ -76,7 +76,9 @@ static int begin_stream(struct transcribe_session * s, const char * lang, int at
     struct transcribe_run_params rp;
     transcribe_run_params_init(&rp);
     rp.timestamps = TRANSCRIBE_TIMESTAMPS_AUTO;
-    if (lang && *lang) rp.language = lang;
+    if (lang && *lang && strcmp(lang, "auto") != 0 && strcmp(lang, "none") != 0) {
+        rp.language = lang;
+    }
     struct transcribe_stream_params sp;
     transcribe_stream_params_init(&sp);
     struct transcribe_parakeet_stream_ext ext;
@@ -118,7 +120,9 @@ int main(int argc, char ** argv) {
                 struct transcribe_run_params rp;
                 transcribe_run_params_init(&rp);
                 rp.timestamps = TRANSCRIBE_TIMESTAMPS_AUTO;
-                if (lang && *lang) rp.language = lang;
+                if (lang && *lang && strcmp(lang, "auto") != 0 && strcmp(lang, "none") != 0) {
+                    rp.language = lang;
+                }
                 st = transcribe_run(s, pcm, (int) n, &rp);
                 if (st != TRANSCRIBE_OK) reply_error(transcribe_status_string(st));
                 else { fputs("{\"text\":", stdout); json_str(transcribe_full_text(s)); fputs("}\n", stdout); fflush(stdout); }

@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"runtime/debug"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -42,6 +43,8 @@ func main() {
 	}
 	if version != "dev" {
 		httpserver.PluginVersion = strings.TrimPrefix(version, "v")
+	} else if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		httpserver.PluginVersion = strings.TrimPrefix(bi.Main.Version, "v")
 	}
 	root := &cobra.Command{
 		Use:   "gleann-plugin-sound",
@@ -72,8 +75,8 @@ Common tasks:
 		SilenceErrors: true,
 	}
 
-	// Load saved config for defaults (fall back to hardcoded defaults if absent).
-	defaultModel := "models/ggml-base.en.bin"
+	// Load saved config for defaults (fall back to absolute ~/.gleann/models/ggml-base.en.bin).
+	defaultModel := config.ModelPath("ggml-base.en.bin")
 	if cfg := config.Load(); cfg != nil && cfg.Completed {
 		if cfg.DefaultModel != "" {
 			defaultModel = cfg.DefaultModel
@@ -144,6 +147,7 @@ Common tasks:
 		newDaemonCmd(),
 		newSpeakersCmd(),
 		newLiveClientCmd(),
+		newModelsCmd(),
 		newVersionCmd(),
 		newUpdateCmd(),
 	)
@@ -152,4 +156,33 @@ Common tasks:
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// resolveModelPath validates and canonicalizes a model path to an absolute path,
+// searching ~/.gleann/models if relative or not found in current directory.
+func resolveModelPath(raw string) (string, error) {
+	if raw == "" {
+		return "", fmt.Errorf("no model specified (use --model flag, set default_model in sound.json, or run 'gleann-plugin-sound models download')")
+	}
+	expanded := config.ExpandPath(raw)
+	if _, err := os.Stat(expanded); err == nil {
+		return expanded, nil
+	}
+
+	// Try ~/.gleann/models/<raw>
+	inModels := config.ModelPath(raw)
+	if _, err := os.Stat(inModels); err == nil {
+		return inModels, nil
+	}
+
+	// Try stripping leading "models/" or "models\"
+	if strings.HasPrefix(raw, "models/") || strings.HasPrefix(raw, "models\\") {
+		clean := strings.TrimPrefix(strings.TrimPrefix(raw, "models/"), "models\\")
+		cand := config.ModelPath(clean)
+		if _, err := os.Stat(cand); err == nil {
+			return cand, nil
+		}
+	}
+
+	return "", fmt.Errorf("model %q not found on disk (searched %s and %s); download it with 'gleann-plugin-sound models download' or run 'gleann-plugin-sound tui'", raw, expanded, inModels)
 }

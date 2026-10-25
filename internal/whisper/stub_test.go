@@ -120,9 +120,9 @@ func TestEngine_TranscribeStream_VariousDurations(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name     string
-		samples  int
-		wantDur  string
+		name    string
+		samples int
+		wantDur string
 	}{
 		{"zero", 0, "0.0s"},
 		{"half_second", 8000, "0.5s"},

@@ -180,7 +180,7 @@ func AvailableNemotronModels() []WhisperModel {
 	return []WhisperModel{
 		{
 			Name:         "nemotron-3.5-asr-int4",
-			DisplayName:  "[Nemotron ASR] Causal Streaming ASR tr/en (INT4) — ~450 MB",
+			DisplayName:  "[Nemotron ASR] Causal Streaming ASR tr/en (INT4 ONNX) — ~450 MB",
 			FileName:     "nemotron-3.5-asr-int4-onnx",
 			Size:         "450 MB",
 			Multilingual: true,
@@ -194,6 +194,14 @@ func AvailableNemotronModels() []WhisperModel {
 				{Name: "vocab.txt", URL: repo + "/vocab.txt"},
 				{Name: "tokenizer.json", URL: repo + "/tokenizer.json"},
 			},
+		},
+		{
+			Name:         "nemotron-3.5-asr-q8-gguf",
+			DisplayName:  "[Nemotron TC] Streaming ASR Q8 GGUF (tc backend) — ~716 MB",
+			FileName:     "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf",
+			Size:         "716 MB",
+			Multilingual: true,
+			URL:          "https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/main/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf",
 		},
 	}
 }

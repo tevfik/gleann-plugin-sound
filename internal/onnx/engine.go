@@ -391,7 +391,7 @@ func (e *Engine) TranscribeStreamSegments(ctx context.Context, pcmData []int16) 
 	if numSamples < nFFT {
 		numSamples = nFFT
 	}
-	numFrames := (numSamples - nFFT) / hopLength + 1
+	numFrames := (numSamples-nFFT)/hopLength + 1
 	if numFrames < 1 {
 		numFrames = 1
 	}
@@ -526,7 +526,7 @@ func (e *Engine) TranscribeWindow(ctx context.Context, pcmData []int16, promptTe
 	if numSamples < nFFT {
 		numSamples = nFFT
 	}
-	numFrames := (numSamples - nFFT) / hopLength + 1
+	numFrames := (numSamples-nFFT)/hopLength + 1
 	if numFrames < 1 {
 		numFrames = 1
 	}
@@ -807,7 +807,7 @@ func (e *Engine) computeMelSpectrogram(samples []float32) []float32 {
 		samples = padded
 	}
 
-	numFrames := (len(samples) - nFFT) / hopLength + 1
+	numFrames := (len(samples)-nFFT)/hopLength + 1
 	if numFrames < 1 {
 		numFrames = 1
 	}

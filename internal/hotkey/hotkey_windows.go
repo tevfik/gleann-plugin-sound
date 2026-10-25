@@ -113,7 +113,7 @@ func keyToExt(k Key) (exthotkey.Key, error) {
 		Key0: exthotkey.Key0, Key1: exthotkey.Key1, Key2: exthotkey.Key2,
 		Key3: exthotkey.Key3, Key4: exthotkey.Key4, Key5: exthotkey.Key5,
 		Key6: exthotkey.Key6, Key7: exthotkey.Key7, Key8: exthotkey.Key8,
-		Key9: exthotkey.Key9,
+		Key9:  exthotkey.Key9,
 		KeyF1: exthotkey.KeyF1, KeyF2: exthotkey.KeyF2, KeyF3: exthotkey.KeyF3,
 		KeyF4: exthotkey.KeyF4, KeyF5: exthotkey.KeyF5, KeyF6: exthotkey.KeyF6,
 		KeyF7: exthotkey.KeyF7, KeyF8: exthotkey.KeyF8, KeyF9: exthotkey.KeyF9,

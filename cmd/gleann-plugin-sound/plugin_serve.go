@@ -47,6 +47,12 @@ Register this plugin with 'gleann-plugin-sound install' before use.`,
 			backend, _ := cmd.Flags().GetString("backend")
 			language, _ := cmd.Flags().GetString("language")
 
+			if resolved, err := resolveModelPath(modelPath); err == nil {
+				modelPath = resolved
+			} else {
+				log.Printf("[plugin-serve] warning: model %q not found at startup: %v (daemon will retry on first request)", modelPath, err)
+			}
+
 			// Read language from config if not specified via flag.
 			if language == "" {
 				if cfg := config.Load(); cfg != nil && cfg.Language != "" {
@@ -56,8 +62,12 @@ Register this plugin with 'gleann-plugin-sound install' before use.`,
 
 			// Engine factory — creates the transcriber on first /convert request.
 			factory := func() (core.Transcriber, error) {
-				log.Printf("[plugin-serve] creating transcriber: backend=%s model=%s", backend, modelPath)
-				return core.NewTranscriber(backend, modelPath)
+				resolved, err := resolveModelPath(modelPath)
+				if err != nil {
+					return nil, fmt.Errorf("model %q not found: %w (check ~/.gleann/models or run 'gleann-plugin-sound setup')", modelPath, err)
+				}
+				log.Printf("[plugin-serve] creating transcriber: backend=%s model=%s", backend, resolved)
+				return core.NewTranscriber(backend, resolved)
 			}
 
 			host, _ := cmd.Flags().GetString("host")

@@ -2,10 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"io"
-	"net/http"
-	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -64,6 +60,11 @@ type downloadDoneMsg struct {
 	err   error
 }
 
+type downloadProgressMsg struct {
+	progress config.DownloadProgress
+	model    config.WhisperModel
+}
+
 type onnxRTDownloadDoneMsg struct {
 	err error
 }
@@ -117,6 +118,16 @@ type SetupModel struct {
 	downloaded  []string
 	downloadErr string
 	downloadQ   []config.WhisperModel // queue of models to download
+
+	progressCh      chan config.DownloadProgress
+	currentFile     string
+	fileIndex       int
+	totalFiles      int
+	bytesRead       int64
+	totalBytes      int64
+	percent         float64
+	speedBPS        float64
+	lastProgressMsg string
 
 	// Default model.
 	installedModels      []config.ModelEntry
@@ -434,7 +445,34 @@ func (m SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinner, cmd = m.spinner.Update(msg)
 		return m, cmd
 
+	case downloadProgressMsg:
+		p := msg.progress
+		if p.FileName != "" {
+			m.currentFile = p.FileName
+		}
+		if p.FileIndex > 0 {
+			m.fileIndex = p.FileIndex
+			m.totalFiles = p.TotalFiles
+		}
+		m.bytesRead = p.BytesRead
+		m.totalBytes = p.TotalBytes
+		m.percent = p.Percent
+		m.speedBPS = p.SpeedBPS
+		if p.Message != "" {
+			m.lastProgressMsg = p.Message
+		}
+		return m, waitForDownloadProgress(msg.model, m.progressCh)
+
 	case downloadDoneMsg:
+		m.currentFile = ""
+		m.fileIndex = 0
+		m.totalFiles = 0
+		m.bytesRead = 0
+		m.totalBytes = 0
+		m.percent = 0
+		m.speedBPS = 0
+		m.lastProgressMsg = ""
+
 		if msg.err != nil {
 			m.downloadErr = fmt.Sprintf("Failed to download %s: %v", msg.model.Name, msg.err)
 		} else {
@@ -459,7 +497,8 @@ func (m SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			next := m.downloadQ[0]
 			m.downloadQ = m.downloadQ[1:]
 			m.downloading = next.DisplayName
-			return m, downloadModel(next)
+			m.progressCh = make(chan config.DownloadProgress, 50)
+			return m, startDownloadModel(next, m.progressCh)
 		}
 		// All done — also add pre-existing models.
 		m.addPreExistingModels()
@@ -635,7 +674,8 @@ func (m SetupModel) updateModelSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.downloadQ = queue[1:]
 		m.downloading = queue[0].DisplayName
 		m.phase = phaseDownloading
-		return m, downloadModel(queue[0])
+		m.progressCh = make(chan config.DownloadProgress, 50)
+		return m, startDownloadModel(queue[0], m.progressCh)
 	}
 	return m, nil
 }
@@ -1046,83 +1086,37 @@ func (m SetupModel) buildConfig() *config.Config {
 	return cfg
 }
 
-// ── Download command ───────────────────────────────────────────
+// ── Download commands ──────────────────────────────────────────
 
-func downloadModel(model config.WhisperModel) tea.Cmd {
+func startDownloadModel(model config.WhisperModel, progressCh chan config.DownloadProgress) tea.Cmd {
 	return func() tea.Msg {
-		dir := config.ModelsDir()
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return downloadDoneMsg{model: model, err: err}
-		}
-
-		// Multi-file bundle (ONNX models).
-		if model.IsBundle() {
-			return downloadBundle(model)
-		}
-
-		// Single-file download (GGML, Silero VAD).
-		return downloadSingleFile(model)
+		go func() {
+			err := config.DownloadModelWithProgress(model, func(p config.DownloadProgress) {
+				select {
+				case progressCh <- p:
+				default:
+				}
+			})
+			if err != nil {
+				progressCh <- config.DownloadProgress{Error: err}
+			}
+			close(progressCh)
+		}()
+		return waitForDownloadProgress(model, progressCh)()
 	}
 }
 
-func downloadSingleFile(model config.WhisperModel) tea.Msg {
-	dest := config.ModelPath(model.FileName)
-
-	// Skip if already exists.
-	if _, err := os.Stat(dest); err == nil {
-		return downloadDoneMsg{model: model, err: nil}
-	}
-
-	if err := httpDownload(model.URL, dest); err != nil {
-		return downloadDoneMsg{model: model, err: err}
-	}
-	return downloadDoneMsg{model: model, err: nil}
-}
-
-func downloadBundle(model config.WhisperModel) tea.Msg {
-	bundleDir := config.ModelPath(model.FileName)
-	if err := os.MkdirAll(bundleDir, 0o755); err != nil {
-		return downloadDoneMsg{model: model, err: err}
-	}
-
-	for _, bf := range model.BundleFiles {
-		dest := filepath.Join(bundleDir, bf.Name)
-		// Skip files already downloaded.
-		if _, err := os.Stat(dest); err == nil {
-			continue
+func waitForDownloadProgress(model config.WhisperModel, progressCh chan config.DownloadProgress) tea.Cmd {
+	return func() tea.Msg {
+		p, ok := <-progressCh
+		if !ok {
+			return downloadDoneMsg{model: model, err: nil}
 		}
-		if err := httpDownload(bf.URL, dest); err != nil {
-			return downloadDoneMsg{model: model, err: fmt.Errorf("%s: %w", bf.Name, err)}
+		if p.Error != nil {
+			return downloadDoneMsg{model: model, err: p.Error}
 		}
+		return downloadProgressMsg{progress: p, model: model}
 	}
-	return downloadDoneMsg{model: model, err: nil}
-}
-
-// httpDownload fetches a URL and writes it to dest atomically via a .tmp file.
-func httpDownload(url, dest string) error {
-	resp, err := http.Get(url)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d for %s", resp.StatusCode, url)
-	}
-
-	f, err := os.Create(dest + ".tmp")
-	if err != nil {
-		return err
-	}
-
-	if _, err := io.Copy(f, resp.Body); err != nil {
-		f.Close()
-		os.Remove(dest + ".tmp")
-		return err
-	}
-	f.Close()
-
-	return os.Rename(dest+".tmp", dest)
 }
 
 // ── View ───────────────────────────────────────────────────────
@@ -1313,16 +1307,53 @@ func (m SetupModel) viewDownloading() string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("  %s Downloading: %s\n\n", m.spinner.View(), m.downloading))
 
-	for _, name := range m.downloaded {
-		b.WriteString(SuccessBadge.Render(fmt.Sprintf("  ✓ %s\n", name)))
+	if m.totalFiles > 1 {
+		fileLabel := m.currentFile
+		if fileLabel == "" {
+			fileLabel = "Preparing bundle files..."
+		}
+		b.WriteString(fmt.Sprintf("  File [%d/%d]: %s\n", m.fileIndex, m.totalFiles, fileLabel))
+	} else if m.currentFile != "" {
+		b.WriteString(fmt.Sprintf("  File: %s\n", m.currentFile))
+	}
+
+	if m.totalBytes > 0 {
+		barWidth := 28
+		completed := int((m.percent / 100.0) * float64(barWidth))
+		if completed > barWidth {
+			completed = barWidth
+		}
+		if completed < 0 {
+			completed = 0
+		}
+		bar := strings.Repeat("█", completed) + strings.Repeat("░", barWidth-completed)
+		readMB := float64(m.bytesRead) / (1024 * 1024)
+		totalMB := float64(m.totalBytes) / (1024 * 1024)
+		speedMB := m.speedBPS / (1024 * 1024)
+
+		b.WriteString(fmt.Sprintf("  [%s] %.1f%% (%.1f MB / %.1f MB)  %.1f MB/s\n\n",
+			bar, m.percent, readMB, totalMB, speedMB))
+	} else if m.bytesRead > 0 {
+		readMB := float64(m.bytesRead) / (1024 * 1024)
+		speedMB := m.speedBPS / (1024 * 1024)
+		b.WriteString(fmt.Sprintf("  Downloaded: %.1f MB  (%.1f MB/s)\n\n", readMB, speedMB))
+	} else if m.lastProgressMsg != "" {
+		b.WriteString(fmt.Sprintf("  %s\n\n", m.lastProgressMsg))
+	}
+
+	if len(m.downloaded) > 0 {
+		b.WriteString("  Completed:\n")
+		for _, name := range m.downloaded {
+			b.WriteString(SuccessBadge.Render(fmt.Sprintf("  ✓ %s\n", name)))
+		}
+		b.WriteString("\n")
 	}
 
 	if m.downloadErr != "" {
 		b.WriteString(ErrorBadge.Render(fmt.Sprintf("  ✗ %s\n", m.downloadErr)))
 	}
 
-	b.WriteString("\n")
-	b.WriteString(StatusBarStyle.Render("  Please wait..."))
+	b.WriteString(StatusBarStyle.Render("  Please wait while files are being downloaded..."))
 	return b.String()
 }
 
@@ -1424,9 +1455,20 @@ func (m SetupModel) viewDefaultModel() string {
 	filtered := m.filteredInstalledModels()
 
 	if len(filtered) == 0 {
-		b.WriteString(ErrorBadge.Render(fmt.Sprintf("  No %s models installed. Download a matching model first.", backend)))
+		hint := ""
+		switch backend {
+		case "whisper":
+			hint = "Tip: 'whisper' uses GGML models (e.g. tiny, base, small, large-v3-turbo)."
+		case "onnx":
+			hint = "Tip: 'onnx' uses Whisper ONNX bundles (e.g. onnx-base, onnx-small)."
+		case "nemotron":
+			hint = "Tip: 'nemotron' uses INT4 ONNX bundle (nemotron-3.5-asr-int4)."
+		case "tc":
+			hint = "Tip: 'tc' uses GGUF model (nemotron-3.5-asr-q8-gguf). If you downloaded INT4 ONNX, choose 'nemotron' backend instead."
+		}
+		b.WriteString(ErrorBadge.Render(fmt.Sprintf("  No %s models installed. Download a matching model first.\n  %s", backend, hint)))
 		b.WriteString("\n\n")
-		b.WriteString(StatusBarStyle.Render("  esc go back to download models"))
+		b.WriteString(StatusBarStyle.Render("  esc go back to select another backend or download models"))
 		return b.String()
 	}
 

@@ -50,7 +50,7 @@ The tool transcribes your speech and calculates the Word Error Rate (WER) and Ch
 
 			fmt.Println("=== GLEANN SOUND INTERACTIVE EVALUATION ===")
 			fmt.Printf("Loading model: %s (backend: %s)\n", modelPath, backend)
-			
+
 			engine, err := core.NewTranscriber(backend, modelPath)
 			if err != nil {
 				return fmt.Errorf("failed to load model: %w", err)

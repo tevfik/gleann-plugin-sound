@@ -61,8 +61,8 @@ func TestSaveAndLoad(t *testing.T) {
 
 	cfg := &Config{
 		DefaultModel: "models/ggml-tiny.bin",
-		Language:      "tr",
-		Hotkey:        "ctrl+shift+space",
+		Language:     "tr",
+		Hotkey:       "ctrl+shift+space",
 		Models: []ModelEntry{
 			{Name: "tiny", Path: "~/.gleann/models/ggml-tiny.bin", Size: "75 MB", Language: "multilingual"},
 		},

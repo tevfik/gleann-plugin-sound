@@ -97,6 +97,12 @@ Requires ffmpeg to be installed and available on $PATH.`,
 				}
 			} else {
 				// ── Initialise transcription engine ──────────────────
+				resolved, err := resolveModelPath(modelPath)
+				if err != nil {
+					return fmt.Errorf("model not found: %w (check ~/.gleann/models or run 'gleann-plugin-sound setup')", err)
+				}
+				modelPath = resolved
+
 				backend, _ := cmd.Flags().GetString("backend")
 				log.Printf("[transcribe] loading model: %s (backend: %s)", modelPath, backend)
 				engine, err := core.NewTranscriber(backend, modelPath)

@@ -15,7 +15,7 @@ GOFLAGS := -trimpath -ldflags "$(LDFLAGS)"
 # CGO flags for whisper.cpp — adjust WHISPER_DIR to your local path.
 WHISPER_DIR ?= $(HOME)/whisper.cpp
 CGO_CFLAGS  := -I$(WHISPER_DIR)/include -I$(WHISPER_DIR)/ggml/include
-CGO_LDFLAGS := -L$(WHISPER_DIR)/build/src -L$(WHISPER_DIR)/build/ggml/src -lwhisper -lggml -lggml-cpu -lggml-base -lm -lstdc++ -lpthread -lgomp
+CGO_LDFLAGS := -L$(WHISPER_DIR)/build/src -L$(WHISPER_DIR)/build/ggml/src -Wl,-rpath,$(WHISPER_DIR)/build/src -Wl,-rpath,$(WHISPER_DIR)/build/ggml/src -Wl,-rpath,'$$ORIGIN' -lwhisper -lggml -lggml-cpu -lggml-base -lm -lstdc++ -lpthread -lgomp
 
 .PHONY: asr-helper all build build-onnx build-all build-stub clean test lint run-dictate run-dictate-nemotron whisper-setup whisper-model onnx-model silero-model install setup-input release
 
@@ -47,6 +47,7 @@ whisper-setup:
 		-DGGML_METAL=OFF \
 		-DGGML_VULKAN=OFF \
 		-DGGML_SYCL=OFF \
+		-DGGML_BF16=OFF \
 		-DWHISPER_BUILD_EXAMPLES=OFF \
 		-DWHISPER_BUILD_TESTS=OFF \
 		-DBUILD_SHARED_LIBS=OFF
@@ -155,6 +156,7 @@ build-stub:
 
 # ─── Tests ────────────────────────────────────────────────────────────
 test:
+	LD_LIBRARY_PATH="$(WHISPER_DIR)/build/src:$(WHISPER_DIR)/build/ggml/src:$$LD_LIBRARY_PATH" \
 	CGO_ENABLED=1 \
 	CGO_CFLAGS="$(CGO_CFLAGS)" \
 	CGO_LDFLAGS="$(CGO_LDFLAGS)" \
