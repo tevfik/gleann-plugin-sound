@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/tevfik/gleann-plugin-sound/internal/config"
@@ -56,6 +57,10 @@ func Run() error {
 			runSpeakers()
 		case ScreenUpdate:
 			runSubcommand("update")
+		case ScreenSettings:
+			if _, err := tea.NewProgram(NewSettingsModel(), tea.WithAltScreen()).Run(); err != nil {
+				return fmt.Errorf("settings: %w", err)
+			}
 		}
 	}
 }
@@ -148,7 +153,7 @@ func runSubcommand(args ...string) {
 	}
 	cmd := exec.Command(exe, args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := runForeground(cmd); err != nil {
 		fmt.Fprintf(os.Stderr, "\n%v\n", err)
 	}
 	fmt.Println("\nPress enter to return to menu...")
@@ -197,7 +202,7 @@ func runCLIMode(cfg *config.Config, mode string) {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	_ = cmd.Run()
+	_ = runForeground(cmd)
 
 	// Wait for user to acknowledge before returning to TUI.
 	fmt.Println("\nPress enter to return to menu...")
@@ -227,4 +232,14 @@ func runDaemonToggle() {
 	fmt.Println("\nPress enter to return to menu...")
 	buf := make([]byte, 1)
 	_, _ = os.Stdin.Read(buf)
+}
+
+// runForeground runs cmd in this terminal. Ctrl+C reaches the whole
+// foreground process group, so while cmd runs this process ignores it: the
+// key stops the command and the menu comes back instead of closing.
+func runForeground(cmd *exec.Cmd) error {
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt)
+	defer signal.Stop(sig)
+	return cmd.Run()
 }

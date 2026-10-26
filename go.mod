@@ -10,11 +10,13 @@ require (
 	github.com/go-vgo/robotgo v0.110.5
 	github.com/gorilla/websocket v1.5.3
 	github.com/spf13/cobra v1.9.1
+	github.com/tevfik/gleann/modules/settings v0.0.0-20261026125249-6940c866c9f4
 	github.com/yalue/onnxruntime_go v1.26.0
 	golang.design/x/hotkey v0.4.1
 )
 
 require (
+	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/charmbracelet/colorprofile v0.4.1 // indirect
 	github.com/charmbracelet/x/ansi v0.11.6 // indirect

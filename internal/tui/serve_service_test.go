@@ -40,11 +40,11 @@ func TestSpeakersToggleMatchPersists(t *testing.T) {
 			t.Fatal("threshold row shown while matching is off")
 		}
 	}
-	if m.matchTh != config.DefaultDictateSpeakerThreshold {
-		t.Errorf("default threshold %.2f", m.matchTh)
+	if m.matchTh() != config.DefaultDictateSpeakerThreshold {
+		t.Errorf("default threshold %.2f", m.matchTh())
 	}
 	m = press(m, keyEnter)
-	if !m.matchOn || !config.Load().DictateSpeakerMatch {
+	if !m.matchOn() || !config.Load().DictateSpeakerMatch {
 		t.Fatal("toggle on was not saved")
 	}
 	m = press(m, keyDown) // the threshold row appears under the toggle
@@ -52,23 +52,23 @@ func TestSpeakersToggleMatchPersists(t *testing.T) {
 		t.Fatalf("row under the toggle is %d", m.rows()[m.cursor].kind)
 	}
 	m = press(m, keyRight)
-	if got := config.Load().DictateThreshold(); got != 0.5 || m.matchTh != 0.5 {
-		t.Errorf("after →: saved %.2f, shown %.2f, want 0.50", got, m.matchTh)
+	if got := config.Load().DictateThreshold(); got != 0.5 || m.matchTh() != 0.5 {
+		t.Errorf("after →: saved %.2f, shown %.2f, want 0.50", got, m.matchTh())
 	}
 	m = press(m, keyLeft, keyLeft)
 	if got := config.Load().DictateThreshold(); got != 0.4 {
 		t.Errorf("after ← ←: %.2f, want 0.40", got)
 	}
 	m = press(m, keyEnter) // reset to the default, stored as "unset"
-	if c := config.Load(); c.DictateSpeakerThreshold != 0 || m.matchTh != config.DefaultDictateSpeakerThreshold {
-		t.Errorf("reset: stored %.2f, shown %.2f", c.DictateSpeakerThreshold, m.matchTh)
+	if c := config.Load(); c.DictateSpeakerThreshold != 0 || m.matchTh() != config.DefaultDictateSpeakerThreshold {
+		t.Errorf("reset: stored %.2f, shown %.2f", c.DictateSpeakerThreshold, m.matchTh())
 	}
 	m = press(m, keyRight, keyLeft) // back on the default: stored as unset too
 	if c := config.Load(); c.DictateSpeakerThreshold != 0 {
 		t.Errorf("default value stored explicitly: %.2f", c.DictateSpeakerThreshold)
 	}
 	m = press(m, keyUp, keyEnter)
-	if m.matchOn || config.Load().DictateSpeakerMatch {
+	if m.matchOn() || config.Load().DictateSpeakerMatch {
 		t.Fatal("toggle off was not saved")
 	}
 	if restarts != 8 {
@@ -77,10 +77,13 @@ func TestSpeakersToggleMatchPersists(t *testing.T) {
 }
 
 func TestStepThresholdBounds(t *testing.T) {
-	if got := stepThreshold(0.80, +1); got != 0.80 {
-		t.Errorf("upper bound: %.2f", got)
+	prefs := config.Settings()
+	c := &config.Config{DictateSpeakerThreshold: 0.80}
+	if _ = prefs.Step(c, keyThreshold, +1); c.DictateThreshold() != 0.80 {
+		t.Errorf("upper bound: %.2f", c.DictateThreshold())
 	}
-	if got := stepThreshold(0.30, -1); got != 0.30 {
-		t.Errorf("lower bound: %.2f", got)
+	c.DictateSpeakerThreshold = 0.30
+	if _ = prefs.Step(c, keyThreshold, -1); c.DictateThreshold() != 0.30 {
+		t.Errorf("lower bound: %.2f", c.DictateThreshold())
 	}
 }

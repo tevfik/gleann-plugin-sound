@@ -24,6 +24,7 @@ const (
 	ScreenTest
 	ScreenSpeakers
 	ScreenUpdate
+	ScreenSettings
 )
 
 type menuItem struct {
@@ -58,6 +59,7 @@ func buildPostSetupMenuItems() []menuItem {
 		{title: daemonTitle, desc: daemonDesc, icon: daemonIcon, screen: ScreenDaemonToggle},
 		{title: "Test", desc: "Diagnose mic, hotkey, speech model & keyboard", icon: "🔬", screen: ScreenTest},
 		{title: "Speakers", desc: "Enrol voices (record from the mic) so meetings show names", icon: "🗣 ", screen: ScreenSpeakers},
+		{title: "Settings", desc: "Change one setting (the same ones as the gleann web UI)", icon: "🎛 ", screen: ScreenSettings},
 		{title: "Setup", desc: "Reconfigure models, language & hotkey", icon: "⚙ ", screen: ScreenSetup},
 		{title: "Update", desc: "Update from the latest GitHub release", icon: "⬆ ", screen: ScreenUpdate},
 		{title: "Install", desc: "Install binary & shell completions system-wide", icon: "📦", screen: ScreenInstall},

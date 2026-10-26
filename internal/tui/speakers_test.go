@@ -140,3 +140,11 @@ func TestSpeakersNamingShowsReadingTextAndTabSwitchesLanguage(t *testing.T) {
 		t.Fatalf("tab should cycle back, got %q", m.Lang())
 	}
 }
+
+func TestSpeakersNameKeepsSingleSpaces(t *testing.T) {
+	m := moveTo(t, NewSpeakersModel(seeded(t)), rowAdd)
+	m = press(m, keyEnter, runes("Test"), tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}}, runes("Kişi"))
+	if m.input != "Test Kişi" {
+		t.Errorf("name = %q", m.input)
+	}
+}

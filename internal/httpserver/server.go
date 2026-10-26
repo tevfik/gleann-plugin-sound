@@ -29,8 +29,10 @@ import (
 	"time"
 
 	"github.com/tevfik/gleann-plugin-sound/internal/audio"
+	"github.com/tevfik/gleann-plugin-sound/internal/config"
 	"github.com/tevfik/gleann-plugin-sound/internal/core"
 	"github.com/tevfik/gleann-plugin-sound/internal/pipeline"
+	"github.com/tevfik/gleann/modules/settings"
 )
 
 // PluginVersion is reported by /info and compared by `update`. main replaces
@@ -141,6 +143,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/convert", s.handleConvert)
 	mux.HandleFunc("/live", s.handleLive)
 	mux.HandleFunc("/settings", s.handleSettings)
+	// Model downloads for the same clients; they outlive the request.
+	mux.Handle("/models", config.Catalog().Handler(context.Background(), s.authorized))
 	return mux
 }
 
@@ -204,7 +208,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		"capabilities":   Capabilities,
 		"extensions":     SupportedExts,
 		// Generic settings form for clients such as the gleann web UI.
-		"settings": map[string]any{"path": "/settings", "schema_version": SettingsSchemaVersion},
+		"settings": map[string]any{"path": "/settings", "schema_version": settings.SchemaVersion},
 	})
 }
 

@@ -123,6 +123,10 @@ Examples:
 				if err != nil {
 					return fmt.Errorf("failed downloading %s: %w", m.Name, err)
 				}
+				// List it in the config, so the Model settings offer it.
+				if err := config.RegisterModel(m); err != nil {
+					fmt.Printf("  (could not add %s to %s: %v)\n", m.Name, config.ConfigPath(), err)
+				}
 			}
 
 			fmt.Println("\n✓ All requested models downloaded successfully.")

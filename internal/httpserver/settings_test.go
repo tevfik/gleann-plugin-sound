@@ -12,6 +12,7 @@ import (
 
 	"github.com/tevfik/gleann-plugin-sound/internal/config"
 	"github.com/tevfik/gleann-plugin-sound/internal/core"
+	"github.com/tevfik/gleann/modules/settings"
 )
 
 // settingsServer runs the handler with HOME pointing at a scratch directory
@@ -62,11 +63,11 @@ func TestSettingsGetDescribesFormWithCurrentValues(t *testing.T) {
 		Fields        []struct {
 			Key, Type string
 			Value     any
-			Options   []settingOption
+			Options   []settings.Option
 		}
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&got)
-	if got.SchemaVersion != SettingsSchemaVersion {
+	if got.SchemaVersion != settings.SchemaVersion {
 		t.Errorf("schema_version = %d", got.SchemaVersion)
 	}
 	byKey := map[string]int{}
@@ -103,7 +104,8 @@ func TestSettingsPutSavesAndKeepsOtherConfig(t *testing.T) {
 		t.Errorf("response = %+v", out)
 	}
 	cfg := config.Load()
-	if cfg.Language != "en" || cfg.Backend != "whisper" || cfg.Hotkey != "ctrl+alt+k" || cfg.AudioSource != "mic" || cfg.SpeakerThreshold != 0.5 {
+	// whisper and mic are the defaults, stored as "" so a later default applies.
+	if cfg.Language != "en" || cfg.Backend != "" || cfg.Hotkey != "ctrl+alt+k" || cfg.AudioSource != "" || cfg.SpeakerThreshold != 0.5 {
 		t.Errorf("config not updated: %+v", cfg)
 	}
 	if cfg.InstallPath != "/keep/me" || !cfg.Completed || len(cfg.Models) != 1 {

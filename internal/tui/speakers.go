@@ -2,13 +2,13 @@ package tui
 
 import (
 	"fmt"
-	"math"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/tevfik/gleann-plugin-sound/internal/config"
 	"github.com/tevfik/gleann-plugin-sound/internal/speaker"
+	"github.com/tevfik/gleann/modules/settings"
 )
 
 type speakersState int
@@ -64,20 +64,28 @@ type SpeakersModel struct {
 	lang   string // language of the text read aloud (tr, en)
 	done   bool
 
-	matchOn bool    // dictation types only enrolled voices (config dictate_speaker_match)
-	matchTh float64 // its threshold (config dictate_speaker_threshold)
+	// The dictate voice-match settings, edited through config.Settings like
+	// every other setting.
+	prefs *settings.Registry[config.Config]
+	cfg   *config.Config
 }
+
+const (
+	keyMatch     = "dictate_speaker_match"
+	keyThreshold = "dictate_speaker_threshold"
+)
+
+// matchOn reports whether dictation types only enrolled voices.
+func (m SpeakersModel) matchOn() bool { return m.prefs.Value(m.cfg, keyMatch) == true }
+
+// matchTh is the voice threshold dictation uses.
+func (m SpeakersModel) matchTh() float64 { return m.cfg.DictateThreshold() }
 
 // NewSpeakersModel loads the registry at path.
 func NewSpeakersModel(path string) SpeakersModel {
-	lang := ""
-	match := false
-	cfg := config.Load()
-	if cfg != nil {
-		lang = cfg.Language
-		match = cfg.DictateSpeakerMatch
-	}
-	m := SpeakersModel{path: path, lang: speaker.NormalizeLanguage(lang), matchOn: match, matchTh: cfg.DictateThreshold()}
+	prefs := config.Settings()
+	cfg, _ := prefs.Load()
+	m := SpeakersModel{path: path, lang: speaker.NormalizeLanguage(cfg.Language), prefs: prefs, cfg: cfg}
 	m.reload()
 	return m
 }
@@ -101,7 +109,7 @@ func (m SpeakersModel) rows() []spRow {
 		rows = append(rows, spRow{kind: rowVoice, voice: i})
 	}
 	rows = append(rows, spRow{kind: rowAdd}, spRow{kind: rowMatch})
-	if m.matchOn {
+	if m.prefs.Visible(m.cfg, keyThreshold) {
 		rows = append(rows, spRow{kind: rowThreshold})
 	}
 	return append(rows, spRow{kind: rowBack})
@@ -161,9 +169,7 @@ func (m SpeakersModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if key.String() == "left" {
 				dir = -1
 			}
-			m.updateMatch(func(c *config.Config) {
-				c.DictateSpeakerThreshold = keepDefault(stepThreshold(c.DictateThreshold(), dir))
-			})
+			m.updateMatch(func(c *config.Config) error { return m.prefs.Step(c, keyThreshold, dir) })
 		}
 	case "enter", " ":
 		switch r := rows[m.cursor]; r.kind {
@@ -172,9 +178,9 @@ func (m SpeakersModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case rowAdd:
 			m.state, m.input, m.notice, m.err = spNaming, "", "", nil
 		case rowMatch:
-			m.updateMatch(func(c *config.Config) { c.DictateSpeakerMatch = !c.DictateSpeakerMatch })
+			m.updateMatch(func(c *config.Config) error { return m.prefs.Step(c, keyMatch, 1) })
 		case rowThreshold:
-			m.updateMatch(func(c *config.Config) { c.DictateSpeakerThreshold = 0 })
+			m.updateMatch(func(c *config.Config) error { return m.prefs.Reset(c, keyThreshold) })
 		case rowBack:
 			m.done = true
 			return m, tea.Quit
@@ -239,39 +245,26 @@ func (m SpeakersModel) updateConfirm(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// keepDefault stores 0 ("use the default") when th is the default, so a later
-// change of the default reaches users who never moved it.
-func keepDefault(th float64) float64 {
-	if math.Abs(th-config.DefaultDictateSpeakerThreshold) < 0.001 {
-		return 0
-	}
-	return th
-}
-
 // restartDictate is replaced in tests so they never touch the real daemon.
 var restartDictate = RestartDaemon
 
-// stepThreshold moves the dictate voice threshold by 0.05 within 0.30-0.80.
-func stepThreshold(th float64, dir int) float64 {
-	th = math.Round((th+0.05*float64(dir))*100) / 100
-	return math.Min(0.80, math.Max(0.30, th))
-}
-
 // updateMatch changes the dictate voice-match settings, saves them and
 // restarts a running dictate daemon so they take effect.
-func (m *SpeakersModel) updateMatch(change func(*config.Config)) {
+func (m *SpeakersModel) updateMatch(change func(*config.Config) error) {
 	cfg := config.Load()
 	if cfg == nil {
 		m.err = fmt.Errorf("no configuration yet: run Setup first")
 		return
 	}
-	change(cfg)
+	if err := change(cfg); err != nil {
+		m.err = err
+		return
+	}
 	if err := config.Save(cfg); err != nil {
 		m.err = err
 		return
 	}
-	m.err = nil
-	m.matchOn, m.matchTh = cfg.DictateSpeakerMatch, cfg.DictateThreshold()
+	m.err, m.cfg = nil, cfg
 	switch restarted, err := restartDictate(); {
 	case err != nil:
 		m.notice = fmt.Sprintf("Saved, but restarting the dictate daemon failed (%v): restart it from the Daemon menu.", err)
@@ -298,11 +291,11 @@ func (m SpeakersModel) updateNaming(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.input = string(r[:len(r)-1])
 		}
 	default:
-		if key.Type == tea.KeyRunes || key.Type == tea.KeySpace {
+		switch key.Type {
+		case tea.KeyRunes:
 			m.input += string(key.Runes)
-			if key.Type == tea.KeySpace {
-				m.input += " "
-			}
+		case tea.KeySpace: // its Runes already hold the space
+			m.input += " "
 		}
 	}
 	return m, nil
@@ -377,7 +370,7 @@ func (m SpeakersModel) rowText(r spRow) (icon, title, desc string) {
 		}
 		return "➕", "Add a voice", desc
 	case rowMatch:
-		if !m.matchOn {
+		if !m.matchOn() {
 			return "🔓", "Dictate: only my voice  [off]", "Dictation types every voice it hears. Enter to type only enrolled voices."
 		}
 		desc := "Dictation types only enrolled voices, after each pause. Enter to turn off."
@@ -386,8 +379,8 @@ func (m SpeakersModel) rowText(r spRow) (icon, title, desc string) {
 		}
 		return "🔒", "Dictate: only my voice  [on]", desc
 	case rowThreshold:
-		val := fmt.Sprintf("◂ %.2f ▸", m.matchTh)
-		if math.Abs(m.matchTh-config.DefaultDictateSpeakerThreshold) < 0.001 {
+		val := fmt.Sprintf("◂ %.2f ▸", m.matchTh())
+		if m.prefs.IsDefault(m.cfg, keyThreshold) {
 			val += "  (default)"
 		}
 		return "🎚 ", "Match threshold  " + val,

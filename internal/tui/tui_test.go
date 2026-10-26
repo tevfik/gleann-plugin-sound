@@ -271,11 +271,11 @@ func TestHomeModelPreSetup(t *testing.T) {
 }
 
 func TestHomeModelPostSetup(t *testing.T) {
-	// With completed config, should show full menu (11 items including Daemon toggle).
+	// With completed config, should show full menu (12 items including Daemon toggle and Settings).
 	cfg := &config.Config{Completed: true, DefaultModel: "test", Language: "tr", Hotkey: "ctrl+space"}
 	m := NewHomeModelWithConfig(cfg)
-	if len(m.items) != 11 {
-		t.Errorf("post-setup menu items = %d, want 11", len(m.items))
+	if len(m.items) != 12 {
+		t.Errorf("post-setup menu items = %d, want 12", len(m.items))
 	}
 	// First should be Dictate.
 	if m.items[0].title != "Dictate" {
