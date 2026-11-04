@@ -3,7 +3,8 @@
 // Benchmark script: Whisper (ggml-small) vs Nemotron ASR on Turkish + English audio.
 //
 // Run from gleann-sound directory:
-//   go run ./test/benchmark_asr.go
+//
+//	go run ./test/benchmark_asr.go
 //
 // Output: latency, RTF (real-time factor), transcribed text, approximate WER.
 package main
