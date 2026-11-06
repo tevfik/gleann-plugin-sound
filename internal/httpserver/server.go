@@ -59,6 +59,18 @@ var SupportedExts = []string{
 	".webm", ".mp4", ".mkv", ".avi",
 }
 
+// maxUploadBytes bounds the request body of /convert.
+const maxUploadBytes = 256 << 20
+
+func extSupported(ext string) bool {
+	for _, e := range SupportedExts {
+		if e == ext {
+			return true
+		}
+	}
+	return false
+}
+
 // decodeStatus maps a decode failure to an HTTP status: a missing ffmpeg is a
 // server problem (500), anything else means the uploaded file is not usable
 // audio (422).
@@ -144,7 +156,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/live", s.handleLive)
 	mux.HandleFunc("/settings", s.handleSettings)
 	// Model downloads for the same clients; they outlive the request.
-	mux.Handle("/models", config.Catalog().Handler(context.Background(), s.authorized))
+	mux.Handle("/models", config.Catalog().Handler(context.Background(), s.authorizedConfig))
 	return mux
 }
 
@@ -217,9 +229,21 @@ func (s *Server) handleConvert(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "only POST is supported")
 		return
 	}
+	if !s.authorized(r) {
+		writeError(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
 
-	// Parse multipart form — 256 MB max (enough for most audio/video files).
-	if err := r.ParseMultipartForm(256 << 20); err != nil {
+	// The 256 MB argument of ParseMultipartForm is only the in-memory
+	// threshold; the body itself is capped so an oversized upload is refused
+	// instead of being spooled to disk and decoded (P-05).
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("upload exceeds %d MB", maxUploadBytes>>20))
+			return
+		}
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("parse multipart: %v", err))
 		return
 	}
@@ -232,7 +256,11 @@ func (s *Server) handleConvert(w http.ResponseWriter, r *http.Request) {
 	defer file.Close()
 
 	// Save to temp file preserving extension (ffmpeg needs it for format detection).
-	ext := filepath.Ext(header.Filename)
+	ext := strings.ToLower(filepath.Ext(header.Filename))
+	if !extSupported(ext) {
+		writeError(w, http.StatusUnsupportedMediaType, fmt.Sprintf("unsupported file extension %q (supported: %s)", ext, strings.Join(SupportedExts, " ")))
+		return
+	}
 	tmp, err := os.CreateTemp("", "gleann-plugin-sound-*"+ext)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("create temp file: %v", err))
@@ -250,6 +278,11 @@ func (s *Server) handleConvert(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
 	defer cancel()
+
+	if err := core.ValidateUpload(ctx, tmpPath); err != nil {
+		writeError(w, decodeStatus(err), err.Error())
+		return
+	}
 
 	var segments []core.Segment
 	if s.refiner != nil {

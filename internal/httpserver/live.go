@@ -86,6 +86,20 @@ func (s *Server) authorized(r *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(got), []byte(s.token)) == 1
 }
 
+// authorizedConfig guards /settings and /models. Without a token the server is
+// loopback-only, so the request must also have been addressed to a loopback
+// name: a DNS-rebound web page otherwise reaches it with a foreign Host (P-02).
+func (s *Server) authorizedConfig(r *http.Request) bool {
+	if s.token != "" {
+		return s.authorized(r)
+	}
+	host, _, err := net.SplitHostPort(r.Host)
+	if err != nil {
+		host = r.Host
+	}
+	return isLoopback(strings.Trim(host, "[]"))
+}
+
 func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
 	if !s.authorized(r) {
 		writeError(w, http.StatusUnauthorized, "invalid or missing token")
