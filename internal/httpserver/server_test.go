@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"testing"
 	"time"
@@ -212,4 +213,13 @@ func TestSettingsRejectsForeignHost(t *testing.T) {
 			t.Errorf("Host %q: status %d, allowed=%v want %v", host, rec.Code, got, want)
 		}
 	}
+}
+
+// Without ffmpeg (some CI runners) the fake-engine tests cannot probe the upload;
+// the playlist test below skips itself in that case.
+func TestMain(m *testing.M) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		validateUpload = func(context.Context, string) error { return nil }
+	}
+	os.Exit(m.Run())
 }

@@ -59,6 +59,10 @@ var SupportedExts = []string{
 	".webm", ".mp4", ".mkv", ".avi",
 }
 
+// validateUpload is core.ValidateUpload; a variable so tests with a fake engine
+// do not need ffmpeg.
+var validateUpload = core.ValidateUpload
+
 // maxUploadBytes bounds the request body of /convert.
 const maxUploadBytes = 256 << 20
 
@@ -279,7 +283,7 @@ func (s *Server) handleConvert(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
 	defer cancel()
 
-	if err := core.ValidateUpload(ctx, tmpPath); err != nil {
+	if err := validateUpload(ctx, tmpPath); err != nil {
 		writeError(w, decodeStatus(err), err.Error())
 		return
 	}
