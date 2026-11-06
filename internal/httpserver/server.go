@@ -106,6 +106,12 @@ type Server struct {
 	// Lazy-loaded engine with mutex for thread safety.
 	mu     sync.Mutex
 	engine core.Transcriber
+
+	srvMu    sync.Mutex
+	srv      *http.Server
+	stopped  bool
+	closeEng sync.Once
+	engErr   error
 }
 
 // SetVADFactory overrides how /live sessions get their voice activity detector
@@ -165,23 +171,64 @@ func (s *Server) Handler() http.Handler {
 }
 
 // Serve starts the HTTP server. Blocks until the server is shut down.
+// A shutdown requested through Shutdown or Close is not an error.
 func (s *Server) Serve() error {
 	mux := http.NewServeMux()
 	mux.Handle("/", s.Handler())
 
 	addr := net.JoinHostPort(s.host, fmt.Sprint(s.port))
-	log.Printf("[plugin-serve] gleann-plugin-sound HTTP plugin on %s", addr)
-	return http.ListenAndServe(addr, mux)
-}
+	srv := &http.Server{Addr: addr, Handler: mux}
+	s.srvMu.Lock()
+	if s.stopped {
+		s.srvMu.Unlock()
+		return nil
+	}
+	s.srv = srv
+	s.srvMu.Unlock()
 
-// Close releases the transcription engine if it was loaded.
-func (s *Server) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.engine != nil {
-		return s.engine.Close()
+	log.Printf("[plugin-serve] gleann-plugin-sound HTTP plugin on %s", addr)
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
 	}
 	return nil
+}
+
+// Shutdown stops accepting requests, lets in-flight ones finish (until ctx
+// expires, then closes them), and releases the engine.
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.srvMu.Lock()
+	s.stopped = true
+	srv := s.srv
+	s.srvMu.Unlock()
+	if srv != nil {
+		if err := srv.Shutdown(ctx); err != nil {
+			_ = srv.Close()
+		}
+	}
+	return s.closeEngine()
+}
+
+// Close stops the listener immediately and releases the engine. Idempotent.
+func (s *Server) Close() error {
+	s.srvMu.Lock()
+	s.stopped = true
+	srv := s.srv
+	s.srvMu.Unlock()
+	if srv != nil {
+		_ = srv.Close()
+	}
+	return s.closeEngine()
+}
+
+func (s *Server) closeEngine() error {
+	s.closeEng.Do(func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.engine != nil {
+			s.engErr = s.engine.Close()
+		}
+	})
+	return s.engErr
 }
 
 // getEngine returns the transcription engine, initialising it on first call.

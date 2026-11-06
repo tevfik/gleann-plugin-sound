@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/tevfik/gleann-plugin-sound/internal/config"
@@ -111,14 +113,24 @@ Register this plugin with 'gleann-plugin-sound install' before use.`,
 			// Graceful shutdown on SIGINT/SIGTERM.
 			sigCh := make(chan os.Signal, 1)
 			signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+			shutdownDone := make(chan struct{})
 			go func() {
 				<-sigCh
 				log.Println("[plugin-serve] shutting down...")
-				srv.Close()
-				os.Exit(0)
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+				defer cancel()
+				_ = srv.Shutdown(ctx)
+				close(shutdownDone)
 			}()
 
-			return srv.Serve()
+			if err := srv.Serve(); err != nil {
+				return err
+			}
+			select {
+			case <-shutdownDone:
+			case <-time.After(25 * time.Second):
+			}
+			return nil
 		},
 	}
 
