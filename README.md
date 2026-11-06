@@ -187,7 +187,7 @@ What the target machine needs:
 |---|---|
 | Microphone capture | ALSA or PulseAudio runtime (`libasound2`, `libpulse0`) |
 | Typing into other apps (dictation) | X11 only: `libx11-6 libxtst6 libxinerama1` (Wayland: transcription and the HTTP server work, key injection does not) |
-| `tc` backend (best live accuracy) | `gleann-asr-helper-<tag>-linux-arm64.tar.gz` from the release, next to the plugin or in `~/.local/bin`; needs `libopenblas0` |
+| `tc` backend (best live accuracy) | `gleann-asr-helper-<tag>-linux-<arch>.tar.gz` from the release, next to the plugin or in `~/.local/bin` (OpenBLAS is linked in, nothing else to install) |
 | `onnx` / `nemotron` backends | nothing: ONNX Runtime is downloaded on first use |
 | File decoding | `ffmpeg` |
 
@@ -277,7 +277,7 @@ refiner re-transcribes it in the background and the better text arrives as a
 `refined` event (WebSocket: `{"type":"refined"}`, `listen`: `"refined":true`).
 
 ```bash
-# 1. Build the sidecar both models run in (transcribe.cpp; needs cmake, libopenblas-dev)
+# 1. Build the sidecar both models run in (transcribe.cpp; needs cmake, libopenblas-dev; OpenBLAS is linked statically)
 make asr-helper                      # installs ~/.local/bin/gleann-asr-helper
 
 # 2. Models (Hugging Face: handy-computer/*-gguf)

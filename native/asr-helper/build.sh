@@ -28,10 +28,12 @@ echo "==> building transcribe.cpp (CPU, native)"
 cmake -S "$src" -B "$src/build" -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE="${GGML_NATIVE:-ON}" -DGGML_BF16=OFF ${CMAKE_EXTRA:-} >/dev/null
 cmake --build "$src/build" -j"$(nproc)" --target transcribe >/dev/null
 
+# OpenBLAS is linked statically: the helper only calls cblas_sgemm/sgemv, and a
+# shared libopenblas.so.0 is missing on most machines that never installed it.
 echo "==> linking gleann-asr-helper"
 mkdir -p "$dest"
 b="$src/build"
 gcc -O2 -Wall -I"$src/include" "$here/main.c" -o "$dest/gleann-asr-helper" \
   "$b/src/libtranscribe.a" "$b/ggml/src/libggml.a" "$b/ggml/src/libggml-cpu.a" "$b/ggml/src/libggml-base.a" \
-  -lopenblas -lstdc++ -lm -lpthread -fopenmp -ldl
+  -Wl,-Bstatic -lopenblas -Wl,-Bdynamic -lstdc++ -lm -lpthread -fopenmp -ldl
 echo "==> installed $dest/gleann-asr-helper"

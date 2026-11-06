@@ -484,6 +484,11 @@ jobs:
           mkdir -p out
           native/asr-helper/build.sh "$PWD/out"
           file out/gleann-asr-helper
+          # The helper must run where libopenblas is not installed.
+          if readelf -d out/gleann-asr-helper | grep NEEDED | grep -qi blas; then
+            readelf -d out/gleann-asr-helper | grep NEEDED
+            echo "::error::gleann-asr-helper links a shared BLAS library"; exit 1
+          fi
 
       - name: Compress binary
         run: |
