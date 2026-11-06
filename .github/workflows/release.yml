@@ -119,6 +119,9 @@ jobs:
           generate_release_notes: ${{ matrix.generate_notes }}
 
   # ── Whisper.cpp build (all platforms, CGO required) ──
+  # x86 builds never use GGML_NATIVE: the runners have AVX-512, and a native
+  # build crashes with SIGILL on CPUs without it (e.g. Intel Core 12th-14th
+  # gen). They target AVX2/FMA/F16C, like the asr-helper job below.
   release-whisper:
     name: Whisper (${{ matrix.os-label }})
     needs: test
@@ -133,7 +136,7 @@ jobs:
             os-label: linux-amd64
             ext: ""
             archive: tar.gz
-            cmake-extra: ""
+            cmake-extra: "-DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_AVX512=OFF"
           - runner: ubuntu-24.04-arm
             goos: linux
             goarch: arm64
@@ -154,7 +157,7 @@ jobs:
             os-label: windows-amd64
             ext: ".exe"
             archive: zip
-            cmake-extra: ""
+            cmake-extra: "-DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_AVX512=OFF"
 
     steps:
       - uses: actions/checkout@v4
@@ -265,6 +268,14 @@ jobs:
           CGO_CFLAGS="-I$WHISPER_DIR/dist/include" \
           CGO_LDFLAGS="-L$WHISPER_DIR/dist/lib -lwhisper -lggml -lggml-cpu -lggml-base $EXTRA_LDFLAGS" \
           go build -trimpath -tags whisper -ldflags "$LDFLAGS" -o "$BINARY" ./cmd/gleann-plugin-sound/
+
+      - name: Check for AVX-512 instructions
+        if: matrix.os-label == 'linux-amd64'
+        run: |
+          # A build that uses AVX-512 dies with SIGILL on most desktop CPUs.
+          n=$(objdump -d --no-show-raw-insn gleann-plugin-sound-${{ steps.version.outputs.version }}-${{ matrix.os-label }} | grep -c '%zmm' || true)
+          echo "zmm instructions: $n"
+          [ "$n" -eq 0 ] || { echo "::error::binary contains AVX-512 instructions"; exit 1; }
 
       - name: Compress binary (tar.gz)
         if: matrix.archive == 'tar.gz'
@@ -398,7 +409,7 @@ jobs:
             -DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DGGML_SYCL=OFF \
             -DWHISPER_BUILD_EXAMPLES=OFF -DWHISPER_BUILD_TESTS=OFF \
             -DBUILD_SHARED_LIBS=OFF \
-            $([ "${{ matrix.arch }}" = arm64 ] && echo -DGGML_NATIVE=OFF)
+            $([ "${{ matrix.arch }}" = arm64 ] && echo -DGGML_NATIVE=OFF || echo -DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_AVX512=OFF)
           cmake --build "$WHISPER_DIR/build" --config Release --parallel 2
           cmake --install "$WHISPER_DIR/build" --config Release
 
@@ -416,6 +427,13 @@ jobs:
           CGO_CFLAGS="-I$WHISPER_DIR/dist/include" \
           CGO_LDFLAGS="-L$WHISPER_DIR/dist/lib -lwhisper -lggml -lggml-cpu -lggml-base -lm -lstdc++ -lpthread -lgomp" \
           go build -trimpath -tags "whisper,onnx" -ldflags "$LDFLAGS" -o "$BINARY" ./cmd/gleann-plugin-sound/
+
+      - name: Check for AVX-512 instructions
+        if: matrix.arch == 'amd64'
+        run: |
+          n=$(objdump -d --no-show-raw-insn gleann-plugin-sound-whisper-onnx-${{ steps.version.outputs.version }}-linux-amd64 | grep -c '%zmm' || true)
+          echo "zmm instructions: $n"
+          [ "$n" -eq 0 ] || { echo "::error::binary contains AVX-512 instructions"; exit 1; }
 
       - name: Compress binary
         run: |
