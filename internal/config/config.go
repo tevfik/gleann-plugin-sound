@@ -75,6 +75,24 @@ type Config struct {
 }
 
 // ModelEntry describes a downloaded Whisper model.
+// BackendForModel returns the backend that loads model e: whisper takes GGML
+// files, onnx the "onnx-" bundles, nemotron the int4 ONNX bundle and tc
+// (transcribe.cpp) the Nemotron GGUF. It returns "" for other GGUF files.
+func BackendForModel(e ModelEntry) string {
+	gguf := strings.HasSuffix(e.Path, ".gguf")
+	switch {
+	case strings.HasPrefix(e.Name, "onnx-"):
+		return "onnx"
+	case strings.HasPrefix(e.Name, "nemotron-") && gguf:
+		return "tc"
+	case strings.HasPrefix(e.Name, "nemotron-"):
+		return "nemotron"
+	case gguf:
+		return ""
+	}
+	return "whisper"
+}
+
 type ModelEntry struct {
 	Name     string `json:"name"`     // e.g. "small"
 	Path     string `json:"path"`     // absolute path

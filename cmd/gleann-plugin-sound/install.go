@@ -78,13 +78,19 @@ func installPlugin(cmd *cobra.Command, port int) error {
 	// Build the auto-start command.
 	command := []string{exePath, "plugin-serve", "--port", fmt.Sprintf("%d", port)}
 
-	// Inherit model/backend/language from config if available.
-	if cfg := config.Load(); cfg != nil && cfg.Completed {
-		if cfg.DefaultModel != "" {
-			command = append(command, "--model", cfg.DefaultModel)
+	// Inherit model/backend/language from sound.json. Every field that is set
+	// counts, also before the setup wizard marked the config completed: a
+	// config written by "models download" already names the downloaded model.
+	if cfg := config.Load(); cfg != nil {
+		model, backend := config.ExpandPath(cfg.DefaultModel), cfg.Backend
+		if model == "" {
+			model, backend = soleInstalledModel(cfg.Models, backend)
 		}
-		if cfg.Backend != "" {
-			command = append(command, "--backend", cfg.Backend)
+		if model != "" {
+			command = append(command, "--model", model)
+		}
+		if backend != "" {
+			command = append(command, "--backend", backend)
 		}
 		if cfg.Language != "" {
 			command = append(command, "--language", cfg.Language)
@@ -94,13 +100,20 @@ func installPlugin(cmd *cobra.Command, port int) error {
 		}
 	}
 
-	// Also check CLI flags (they override config).
-	if model, _ := cmd.Flags().GetString("model"); model != "" && model != "models/ggml-base.en.bin" {
-		// Replace any existing --model in command.
-		command = replaceFlag(command, "--model", model)
+	// Flags override the config only when given on the command line. Their
+	// defaults (e.g. ~/.gleann/models/ggml-base.en.bin) must not replace a
+	// model from sound.json.
+	if f := cmd.Flags().Lookup("model"); f != nil && f.Changed {
+		command = replaceFlag(command, "--model", config.ExpandPath(f.Value.String()))
 	}
-	if backend, _ := cmd.Flags().GetString("backend"); backend != "" && backend != "whisper" {
-		command = replaceFlag(command, "--backend", backend)
+	if f := cmd.Flags().Lookup("backend"); f != nil && f.Changed {
+		command = replaceFlag(command, "--backend", f.Value.String())
+	}
+
+	if model := flagValue(command, "--model"); model == "" {
+		fmt.Fprintln(os.Stderr, "Warning: no model configured; plugin-serve will use its default. Set one with --model or 'gleann-plugin-sound tui'.")
+	} else if _, err := os.Stat(model); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: model %s not found; download it with 'gleann-plugin-sound models download'.\n", model)
 	}
 
 	// Read existing registry.
@@ -163,6 +176,39 @@ func installPlugin(cmd *cobra.Command, port int) error {
 	fmt.Printf("  Command:      %v\n", entry.Command)
 	fmt.Printf("  Extensions:   %v\n", entry.Extensions)
 	return nil
+}
+
+// soleInstalledModel picks the model when sound.json names none: the only
+// listed model that exists on disk and fits backend (any backend when it is
+// empty). It returns that model and its backend, or ("", backend) when there
+// is no such model or more than one.
+func soleInstalledModel(models []config.ModelEntry, backend string) (string, string) {
+	var pick config.ModelEntry
+	n := 0
+	for _, e := range models {
+		b := config.BackendForModel(e)
+		if b == "" || (backend != "" && b != backend) {
+			continue
+		}
+		if _, err := os.Stat(config.ExpandPath(e.Path)); err != nil {
+			continue
+		}
+		pick, n = e, n+1
+	}
+	if n != 1 {
+		return "", backend
+	}
+	return config.ExpandPath(pick.Path), config.BackendForModel(pick)
+}
+
+// flagValue returns the value that follows flag in cmd, or "".
+func flagValue(cmd []string, flag string) string {
+	for i, arg := range cmd {
+		if arg == flag && i+1 < len(cmd) {
+			return cmd[i+1]
+		}
+	}
+	return ""
 }
 
 // replaceFlag replaces or appends a --flag value pair in a command slice.

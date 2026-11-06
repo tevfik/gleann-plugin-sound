@@ -1066,18 +1066,7 @@ func (m SetupModel) filteredInstalledModels() []config.ModelEntry {
 // given backend: whisper takes GGML files, onnx the "onnx-" bundles, nemotron
 // the int4 ONNX bundle and tc (transcribe.cpp) the Nemotron GGUF.
 func modelFitsBackend(backend string, e config.ModelEntry) bool {
-	switch backend {
-	case "whisper":
-		return !strings.HasPrefix(e.Name, "onnx-") && !strings.HasPrefix(e.Name, "nemotron-") &&
-			!strings.HasSuffix(e.Path, ".gguf")
-	case "onnx":
-		return strings.HasPrefix(e.Name, "onnx-")
-	case "nemotron":
-		return strings.HasPrefix(e.Name, "nemotron-") && !strings.HasSuffix(e.Path, ".gguf")
-	case "tc":
-		return strings.HasPrefix(e.Name, "nemotron-") && strings.HasSuffix(e.Path, ".gguf")
-	}
-	return false
+	return backend != "" && config.BackendForModel(e) == backend
 }
 
 // selectedHotkey returns the currently selected hotkey string.
