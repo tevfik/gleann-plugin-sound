@@ -75,29 +75,68 @@ func isLoopback(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// hasToken reports whether any access token is configured: the operator's
+// --token / GLEANN_SOUND_TOKEN, or the one gleann hands over in
+// GLEANN_PLUGIN_TOKEN.
+func (s *Server) hasToken() bool { return s.token != "" || s.pluginToken != "" }
+
+// authorized accepts either configured token (constant-time compare). Both are
+// always compared so timing does not reveal which one matched.
 func (s *Server) authorized(r *http.Request) bool {
-	if s.token == "" {
+	if !s.hasToken() {
 		return true
 	}
 	got := r.URL.Query().Get("token")
 	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
 		got = strings.TrimPrefix(h, "Bearer ")
 	}
-	return subtle.ConstantTimeCompare([]byte(got), []byte(s.token)) == 1
+	ok := 0
+	for _, want := range []string{s.token, s.pluginToken} {
+		if want != "" {
+			ok |= subtle.ConstantTimeCompare([]byte(got), []byte(want))
+		}
+	}
+	return ok == 1
+}
+
+// hostIsLoopback reports whether the request was addressed to a loopback name.
+func hostIsLoopback(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.Host)
+	if err != nil {
+		host = r.Host
+	}
+	return isLoopback(strings.Trim(host, "[]"))
+}
+
+// guard protects every route except /health: a server bound to loopback only
+// serves requests addressed to a loopback Host (DNS rebinding), and when a
+// token is configured it must be presented.
+func (s *Server) guard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if isLoopback(s.host) && !hostIsLoopback(r) {
+			writeError(w, http.StatusForbidden, "Host header is not a loopback name")
+			return
+		}
+		if !s.authorized(r) {
+			writeError(w, http.StatusUnauthorized, "invalid or missing token")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // authorizedConfig guards /settings and /models. Without a token the server is
 // loopback-only, so the request must also have been addressed to a loopback
 // name: a DNS-rebound web page otherwise reaches it with a foreign Host (P-02).
 func (s *Server) authorizedConfig(r *http.Request) bool {
-	if s.token != "" {
+	if s.hasToken() {
 		return s.authorized(r)
 	}
-	host, _, err := net.SplitHostPort(r.Host)
-	if err != nil {
-		host = r.Host
-	}
-	return isLoopback(strings.Trim(host, "[]"))
+	return hostIsLoopback(r)
 }
 
 func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {

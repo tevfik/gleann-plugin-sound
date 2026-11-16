@@ -80,6 +80,20 @@ Register this plugin with 'gleann-plugin-sound install' before use.`,
 			}
 			maxLive, _ := cmd.Flags().GetInt("max-live")
 
+			// gleann passes a per-launch token in GLEANN_PLUGIN_TOKEN; it is
+			// accepted next to --token / GLEANN_SOUND_TOKEN.
+			pluginToken := os.Getenv("GLEANN_PLUGIN_TOKEN")
+			maxDurStr, _ := cmd.Flags().GetString("max-duration")
+			if !cmd.Flags().Changed("max-duration") {
+				if v := os.Getenv("GLEANN_SOUND_MAX_DURATION"); v != "" {
+					maxDurStr = v
+				}
+			}
+			maxDuration, err := time.ParseDuration(maxDurStr)
+			if err != nil || maxDuration < 0 {
+				return fmt.Errorf("invalid --max-duration %q (use e.g. 4h, 90m, or 0 to disable)", maxDurStr)
+			}
+
 			srv := httpserver.New(factory, language, port)
 			refineFlag, _ := cmd.Flags().GetString("refine-model")
 			refineModel := resolveRefineModel(refineFlag)
@@ -102,8 +116,13 @@ Register this plugin with 'gleann-plugin-sound install' before use.`,
 				srv.SetRefiner(r)
 				log.Printf("[plugin-serve] /live refinement on (%s)", refineModel)
 			}
+			srv.SetPluginToken(pluginToken)
+			srv.SetMaxDuration(maxDuration)
 			if err := srv.SetListen(host, token, maxLive); err != nil {
 				return err
+			}
+			if token == "" && pluginToken == "" {
+				log.Printf("[plugin-serve] WARNING: no access token configured (--token, GLEANN_SOUND_TOKEN or GLEANN_PLUGIN_TOKEN); /convert, /info, /settings and /models accept any local caller")
 			}
 			if cfg := config.Load(); cfg != nil {
 				srv.SetCorrector(core.NewCorrector(cfg.Corrections))
@@ -176,11 +195,13 @@ Run it from the installed copy, not from a build directory.`,
 	cmd.Flags().String("host", "127.0.0.1",
 		"Address to listen on. Use 0.0.0.0 to accept phones/other machines (requires --token)")
 	cmd.Flags().String("token", "",
-		"Access token required by the /live WebSocket (or env GLEANN_SOUND_TOKEN)")
+		"Access token required on every route except /health (or env GLEANN_SOUND_TOKEN); GLEANN_PLUGIN_TOKEN from gleann is accepted too")
 	cmd.Flags().Bool("speakers", false,
 		"Label /live utterances with their speaker (auto-on once voices are enrolled; --speakers=false disables)")
 	cmd.Flags().String("refine-model", "",
 		"GGUF model (Qwen3-ASR) that re-transcribes each /live utterance after it ends ({\"type\":\"refined\"}). Default: refine_model from sound.json; --refine-model=off disables")
+	cmd.Flags().String("max-duration", httpserver.DefaultMaxDuration.String(),
+		"Longest media /convert accepts (413 beyond it; 0 disables; env GLEANN_SOUND_MAX_DURATION)")
 	cmd.Flags().Int("max-live", httpserver.DefaultMaxLive, "Maximum concurrent /live sessions")
 	cmd.Flags().String("language", "",
 		"Language code for transcription (e.g. tr, en). Empty = auto-detect")

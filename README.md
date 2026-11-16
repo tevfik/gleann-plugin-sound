@@ -484,6 +484,27 @@ gleann-plugin-sound plugin-serve --port 8767 --language tr
 
 The model is loaded **lazily** on the first `/convert` request, so the server starts instantly and health checks pass immediately.
 
+#### Access control
+
+- **From gleann**: when gleann launches the plugin it sets `GLEANN_PLUGIN_TOKEN` to a random per-launch
+  token and sends it as `Authorization: Bearer <token>` on every request. For a plugin you start yourself,
+  put the same value in the plugin's `token` field in `~/.gleann/plugins.json`.
+- **Your own token**: `--token` / `GLEANN_SOUND_TOKEN` still works (and stays mandatory off loopback unless
+  `GLEANN_PLUGIN_TOKEN` is set). When both are set, either is accepted.
+- With a token configured, every route except `GET /health` answers `401` without it (`/live` also accepts
+  `?token=`). Comparison is constant-time.
+- When bound to loopback (the default), a request whose `Host` header is not a loopback name gets `403`
+  (DNS rebinding), token or not. `/health` is exempt.
+- With no token at all the server behaves as before and logs a warning at start-up, so older gleann
+  versions (which send no token) keep working.
+
+#### Media length limit
+
+`/convert` probes the declared duration (ffprobe, or ffmpeg when ffprobe is missing) before decoding and
+answers `413` with a JSON error when it exceeds `--max-duration` (default `4h`, env
+`GLEANN_SOUND_MAX_DURATION`, `0` disables). Containers that declare no duration cannot be checked; that is
+logged and the upload is processed (the 256 MB upload cap and the request timeout still apply).
+
 ### Notes
 
 - **Timeout**: gleann's PluginManager uses a configurable HTTP timeout per file (default: 120 seconds). Plugins can specify their own timeout in `plugins.json`. For very long files, use `gleann-plugin-sound transcribe --file` separately.

@@ -48,6 +48,10 @@ const (
 	// requestTimeout bounds a single transcription (RTF is ~0.2, so this
 	// covers recordings of several hours).
 	requestTimeout = 30 * time.Minute
+
+	// DefaultMaxDuration is the longest recording /convert accepts unless
+	// configured otherwise.
+	DefaultMaxDuration = 4 * time.Hour
 )
 
 // Capabilities advertised to gleann.
@@ -62,6 +66,33 @@ var SupportedExts = []string{
 // validateUpload is core.ValidateUpload; a variable so tests with a fake engine
 // do not need ffmpeg.
 var validateUpload = core.ValidateUpload
+
+// probeDuration is core.ProbeDuration; a variable so tests with fake media do
+// not need ffprobe.
+var probeDuration = core.ProbeDuration
+
+// checkDuration rejects media longer than the configured cap before anything
+// is decoded. It returns the HTTP status and message to send, or 0.
+func (s *Server) checkDuration(ctx context.Context, path string) (int, string) {
+	if s.maxDuration <= 0 {
+		return 0, ""
+	}
+	d, err := probeDuration(ctx, path)
+	switch {
+	case err == nil:
+		if d > s.maxDuration {
+			return http.StatusRequestEntityTooLarge,
+				fmt.Sprintf("media is %s long; the limit is %s", d.Round(time.Second), s.maxDuration)
+		}
+	case errors.Is(err, core.ErrDurationUnknown):
+		log.Printf("[plugin-serve] duration of the upload is not declared; the %s cap cannot be checked", s.maxDuration)
+	case errors.Is(err, exec.ErrNotFound):
+		log.Printf("[plugin-serve] ffprobe/ffmpeg not found; the %s duration cap is not enforced", s.maxDuration)
+	default:
+		log.Printf("[plugin-serve] cannot probe duration: %v", err)
+	}
+	return 0, ""
+}
 
 // maxUploadBytes bounds the request body of /convert.
 const maxUploadBytes = 256 << 20
@@ -99,9 +130,14 @@ type Server struct {
 	speakers  core.SpeakerLabeler
 	openVAD   func() (core.VADProvider, func()) // per-session voice activity detector
 
-	host     string // listen address; loopback unless set
-	token    string // required by /live when non-empty
-	liveSlot chan struct{}
+	host  string // listen address; loopback unless set
+	token string // access token (--token); required on every route except /health when non-empty
+	// pluginToken is the token gleann generated for this process
+	// (GLEANN_PLUGIN_TOKEN); accepted in addition to token.
+	pluginToken string
+	// maxDuration caps the media length /convert accepts; 0 disables the cap.
+	maxDuration time.Duration
+	liveSlot    chan struct{}
 
 	// Lazy-loaded engine with mutex for thread safety.
 	mu     sync.Mutex
@@ -147,7 +183,7 @@ func (s *Server) SetListen(host, token string, maxLive int) error {
 	if host == "" {
 		host = "127.0.0.1"
 	}
-	if token == "" && !isLoopback(host) {
+	if token == "" && s.pluginToken == "" && !isLoopback(host) {
 		return fmt.Errorf("refusing to listen on %q without an access token (--token)", host)
 	}
 	s.host, s.token = host, token
@@ -167,8 +203,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/settings", s.handleSettings)
 	// Model downloads for the same clients; they outlive the request.
 	mux.Handle("/models", config.Catalog().Handler(context.Background(), s.authorizedConfig))
-	return mux
+	return s.guard(mux)
 }
+
+// SetPluginToken sets the token gleann passes in GLEANN_PLUGIN_TOKEN. Call it
+// before SetListen. It is accepted alongside the operator's --token.
+func (s *Server) SetPluginToken(token string) { s.pluginToken = token }
+
+// SetMaxDuration caps the duration of media accepted by /convert (0 = no cap).
+func (s *Server) SetMaxDuration(d time.Duration) { s.maxDuration = d }
 
 // Serve starts the HTTP server. Blocks until the server is shut down.
 // A shutdown requested through Shutdown or Close is not an error.
@@ -332,6 +375,10 @@ func (s *Server) handleConvert(w http.ResponseWriter, r *http.Request) {
 
 	if err := validateUpload(ctx, tmpPath); err != nil {
 		writeError(w, decodeStatus(err), err.Error())
+		return
+	}
+	if status, msg := s.checkDuration(ctx, tmpPath); status != 0 {
+		writeError(w, status, msg)
 		return
 	}
 
