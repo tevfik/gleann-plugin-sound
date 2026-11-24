@@ -18,6 +18,7 @@
 
 ### Fixed
 
+- The ONNX Runtime auto-download uses the official NuGet package (GitHub releases of microsoft/onnxruntime were removed), sha256-verified. Intel macOS has no package and now reports a clear error.
 - `gleann-plugin-sound install` refuses to touch a `plugins.json` that is not valid JSON (clear error, non-zero
   exit, file untouched) and writes the registry atomically (temp file + rename, mode kept, symlink followed).
 - Without a token, `/live` refuses a WebSocket `Origin` that is not a loopback name (cross-site pages); a
@@ -33,6 +34,10 @@
   `~/.gleann/plugins.json`, neither on its own entry nor on other plugins' entries.
 - An invalid `GLEANN_SOUND_MAX_DURATION` is reported under that name instead of `--max-duration`.
 - The fallback plugin version for builds without a stamped version is `dev` instead of the stale `1.0.0`.
+
+### CI
+
+- ONNX Runtime is fetched from the official NuGet package (GitHub releases of microsoft/onnxruntime are gone), sha256-pinned.
 
 ### Docs
 
