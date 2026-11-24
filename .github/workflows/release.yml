@@ -331,8 +331,10 @@ jobs:
       - name: Install ONNX Runtime
         run: |
           ORT_VERSION="1.22.0"
-          curl -sSL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-${{ matrix.ort-arch }}-${ORT_VERSION}.tgz" \
-            | sudo tar xz -C /usr/local --strip-components=1
+          .github/scripts/fetch-onnxruntime.sh "$ORT_VERSION" ${{ matrix.ort-arch }} "$RUNNER_TEMP/ort"
+          ORT_DIR="$RUNNER_TEMP/ort/onnxruntime-linux-${{ matrix.ort-arch }}-$ORT_VERSION"
+          sudo cp -a "$ORT_DIR/include/." /usr/local/include/
+          sudo cp -a "$ORT_DIR/lib/." /usr/local/lib/
           sudo ldconfig
 
       - name: Determine version
@@ -395,8 +397,10 @@ jobs:
       - name: Install ONNX Runtime
         run: |
           ORT_VERSION="1.22.0"
-          curl -sSL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-${{ matrix.ort-arch }}-${ORT_VERSION}.tgz" \
-            | sudo tar xz -C /usr/local --strip-components=1
+          .github/scripts/fetch-onnxruntime.sh "$ORT_VERSION" ${{ matrix.ort-arch }} "$RUNNER_TEMP/ort"
+          ORT_DIR="$RUNNER_TEMP/ort/onnxruntime-linux-${{ matrix.ort-arch }}-$ORT_VERSION"
+          sudo cp -a "$ORT_DIR/include/." /usr/local/include/
+          sudo cp -a "$ORT_DIR/lib/." /usr/local/lib/
           sudo ldconfig
 
       - name: Build whisper.cpp (CPU-only)

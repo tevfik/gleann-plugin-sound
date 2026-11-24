@@ -161,8 +161,10 @@ jobs:
       - name: Install ONNX Runtime
         run: |
           ORT_VERSION="1.22.0"
-          curl -sSL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz" \
-            | sudo tar xz -C /usr/local --strip-components=1
+          .github/scripts/fetch-onnxruntime.sh "$ORT_VERSION" x64 "$RUNNER_TEMP/ort"
+          ORT_DIR="$RUNNER_TEMP/ort/onnxruntime-linux-x64-$ORT_VERSION"
+          sudo cp -a "$ORT_DIR/include/." /usr/local/include/
+          sudo cp -a "$ORT_DIR/lib/." /usr/local/lib/
           sudo ldconfig
 
       - name: Build (with ONNX Runtime)
@@ -214,8 +216,10 @@ jobs:
       - name: Install ONNX Runtime
         run: |
           ORT_VERSION="1.22.0"
-          curl -sSL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz" \
-            | sudo tar xz -C /usr/local --strip-components=1
+          .github/scripts/fetch-onnxruntime.sh "$ORT_VERSION" x64 "$RUNNER_TEMP/ort"
+          ORT_DIR="$RUNNER_TEMP/ort/onnxruntime-linux-x64-$ORT_VERSION"
+          sudo cp -a "$ORT_DIR/include/." /usr/local/include/
+          sudo cp -a "$ORT_DIR/lib/." /usr/local/lib/
           sudo ldconfig
 
       - name: Build whisper.cpp (CPU-only)
