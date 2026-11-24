@@ -486,24 +486,38 @@ The model is loaded **lazily** on the first `/convert` request, so the server st
 
 #### Access control
 
-- **From gleann**: when gleann launches the plugin it sets `GLEANN_PLUGIN_TOKEN` to a random per-launch
-  token and sends it as `Authorization: Bearer <token>` on every request. For a plugin you start yourself,
-  put the same value in the plugin's `token` field in `~/.gleann/plugins.json`.
+- **From gleann**: gleann stores one token per plugin (and reuses it across launches). When it launches the
+  plugin it sets `GLEANN_PLUGIN_TOKEN` to that token and sends it as `Authorization: Bearer <token>` on every
+  request. For a plugin you start yourself, put the same value in the plugin's `token` field in
+  `~/.gleann/plugins.json`; `gleann-plugin-sound install` keeps that field.
 - **Your own token**: `--token` / `GLEANN_SOUND_TOKEN` still works (and stays mandatory off loopback unless
   `GLEANN_PLUGIN_TOKEN` is set). When both are set, either is accepted.
-- With a token configured, every route except `GET /health` answers `401` without it (`/live` also accepts
-  `?token=`). Comparison is constant-time.
-- When bound to loopback (the default), a request whose `Host` header is not a loopback name gets `403`
-  (DNS rebinding), token or not. `/health` is exempt.
+- With a token configured, every route except `GET /health` answers `401` without it. The token goes in the
+  `Authorization: Bearer` header (the scheme is case-insensitive); only `/live` also accepts `?token=`, for
+  browsers that cannot set headers on a WebSocket. Comparison is constant-time.
+- When bound to loopback (the default) and no valid token is presented, a request whose `Host` header is not
+  a loopback name (`localhost`, any case, optional trailing dot, `127.0.0.0/8`, `::1`) gets `403` (DNS
+  rebinding). A request with a valid token skips this check, so a TLS reverse proxy that forwards its public
+  `Host` works. `/health` is exempt.
 - With no token at all the server behaves as before and logs a warning at start-up, so older gleann
   versions (which send no token) keep working.
 
 #### Media length limit
 
 `/convert` probes the declared duration (ffprobe, or ffmpeg when ffprobe is missing) before decoding and
-answers `413` with a JSON error when it exceeds `--max-duration` (default `4h`, env
+answers `413` with a JSON error when it exceeds `--max-duration` (default `2h`, env
 `GLEANN_SOUND_MAX_DURATION`, `0` disables). Containers that declare no duration cannot be checked; that is
 logged and the upload is processed (the 256 MB upload cap and the request timeout still apply).
+
+The declared duration can be wrong, so decoding is capped too: ffmpeg is stopped as soon as the decoded
+audio exceeds the limit (plus one second) and the request answers `413` ("decoded audio is longer than the
+limit"). The decoded audio is never buffered past the cap.
+
+The duration probe has its own 30 s timeout; a probe that hangs answers `422`.
+
+**Limit versus request timeout**: the default limit (2 h) fits inside the 30 minute request deadline: at
+roughly 0.2x real time, 2 h of audio takes about 24 minutes on a typical CPU. On slower hardware media near the
+limit can still time out; lower `--max-duration` (for example `90m`) if you want a `413` instead of a timeout.
 
 ### Notes
 

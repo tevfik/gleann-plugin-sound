@@ -84,14 +84,15 @@ Register this plugin with 'gleann-plugin-sound install' before use.`,
 			// accepted next to --token / GLEANN_SOUND_TOKEN.
 			pluginToken := os.Getenv("GLEANN_PLUGIN_TOKEN")
 			maxDurStr, _ := cmd.Flags().GetString("max-duration")
+			maxDurSource := "--max-duration"
 			if !cmd.Flags().Changed("max-duration") {
 				if v := os.Getenv("GLEANN_SOUND_MAX_DURATION"); v != "" {
-					maxDurStr = v
+					maxDurStr, maxDurSource = v, "GLEANN_SOUND_MAX_DURATION"
 				}
 			}
-			maxDuration, err := time.ParseDuration(maxDurStr)
-			if err != nil || maxDuration < 0 {
-				return fmt.Errorf("invalid --max-duration %q (use e.g. 4h, 90m, or 0 to disable)", maxDurStr)
+			maxDuration, err := parseMaxDuration(maxDurStr, maxDurSource)
+			if err != nil {
+				return err
 			}
 
 			srv := httpserver.New(factory, language, port)
@@ -207,4 +208,14 @@ Run it from the installed copy, not from a build directory.`,
 		"Language code for transcription (e.g. tr, en). Empty = auto-detect")
 
 	return cmd
+}
+
+// parseMaxDuration parses the duration cap; source names the flag or
+// environment variable it came from so the error points at the right one.
+func parseMaxDuration(v, source string) (time.Duration, error) {
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("invalid %s %q (use e.g. 2h, 90m, or 0 to disable)", source, v)
+	}
+	return d, nil
 }

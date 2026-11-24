@@ -191,3 +191,121 @@ func TestInstallPicksSoleDownloadedModel(t *testing.T) {
 		t.Fatalf("ambiguous models must not be picked, got %v", got)
 	}
 }
+
+// F5: install must keep fields it does not know (token, ...) on every entry,
+// its own previous entry included, and at the top level.
+func TestInstallKeepsUnknownFieldsAndTokens(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".gleann")
+	_ = os.MkdirAll(dir, 0o755)
+	existing := `{"future":{"a":1},"plugins":[
+	 {"name":"gleann-plugin-docs","url":"http://localhost:8765","command":["docs"],
+	  "capabilities":["document-extraction"],"extensions":[".pdf"],"token":"DOCS-SECRET","x_new":[1,2]},
+	 {"name":"gleann-plugin-sound","url":"http://localhost:8766","command":["old"],
+	  "capabilities":["document-extraction"],"extensions":[".mp3"],"token":"SOUND-SECRET","priority":3}]}`
+	_ = os.WriteFile(filepath.Join(dir, "plugins.json"), []byte(existing), 0o644)
+
+	if err := installPlugin(newInstallPluginCmd(), 8767); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "plugins.json"))
+	var out struct {
+		Future  json.RawMessage              `json:"future"`
+		Plugins []map[string]json.RawMessage `json:"plugins"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatal(err)
+	}
+	if string(out.Future) != `{"a":1}` && !strings.Contains(string(out.Future), `"a"`) {
+		t.Errorf("top-level field lost: %s", data)
+	}
+	by := map[string]map[string]json.RawMessage{}
+	for _, p := range out.Plugins {
+		var n string
+		_ = json.Unmarshal(p["name"], &n)
+		by[n] = p
+	}
+	if string(by["gleann-plugin-docs"]["token"]) != `"DOCS-SECRET"` || by["gleann-plugin-docs"]["x_new"] == nil {
+		t.Errorf("docs entry lost fields: %s", data)
+	}
+	snd := by["gleann-plugin-sound"]
+	if string(snd["token"]) != `"SOUND-SECRET"` || string(snd["priority"]) != "3" {
+		t.Errorf("sound entry lost its token/priority: %s", data)
+	}
+	if string(snd["url"]) != `"http://localhost:8767"` {
+		t.Errorf("sound entry not updated: %s", snd["url"])
+	}
+}
+
+// R3: a registry that does not parse is never overwritten.
+func TestInstallRefusesMalformedRegistry(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".gleann")
+	_ = os.MkdirAll(dir, 0o755)
+	for _, bad := range []string{
+		`{"plugins":[{"name":"gleann-plugin-docs","token":"DOCS"},]}`,
+		`{"plugins":{"not":"a list"}}`,
+	} {
+		f := filepath.Join(dir, "plugins.json")
+		_ = os.WriteFile(f, []byte(bad), 0o600)
+		if err := installPlugin(newInstallPluginCmd(), 8767); err == nil {
+			t.Errorf("install accepted %q", bad)
+		}
+		if got, _ := os.ReadFile(f); string(got) != bad {
+			t.Errorf("malformed registry was modified: %s", got)
+		}
+	}
+}
+
+// R3: the write goes through a temp file and a rename; mode and symlinks are
+// kept and nothing is left behind.
+func TestInstallWritesAtomicallyKeepingModeAndSymlink(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".gleann")
+	real := filepath.Join(home, "dotfiles")
+	_ = os.MkdirAll(dir, 0o755)
+	_ = os.MkdirAll(real, 0o755)
+	target := filepath.Join(real, "plugins.json")
+	_ = os.WriteFile(target, []byte(`{"plugins":[]}`), 0o600)
+	link := filepath.Join(dir, "plugins.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skip("symlinks unavailable")
+	}
+	if err := installPlugin(newInstallPluginCmd(), 8767); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := os.Lstat(link); err != nil || st.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the symlink was replaced: %v %v", st, err)
+	}
+	st, _ := os.Stat(target)
+	if st.Mode().Perm() != 0o600 {
+		t.Errorf("mode = %v, want 0600", st.Mode().Perm())
+	}
+	if b, _ := os.ReadFile(target); !strings.Contains(string(b), "gleann-plugin-sound") {
+		t.Errorf("target not updated: %s", b)
+	}
+	for _, d := range []string{dir, real} {
+		ents, _ := os.ReadDir(d)
+		for _, e := range ents {
+			if strings.Contains(e.Name(), ".tmp-") {
+				t.Errorf("temp file left behind: %s", e.Name())
+			}
+		}
+	}
+}
+
+func TestWriteFileAtomicFailureKeepsOriginal(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "plugins.json")
+	_ = os.WriteFile(f, []byte("orig"), 0o644)
+	// A directory cannot be renamed over a file's path: the original must survive.
+	if err := writeFileAtomic(filepath.Join(dir, "missing", "plugins.json"), []byte("x"), 0o644); err == nil {
+		t.Fatal("want an error for a missing directory")
+	}
+	if b, _ := os.ReadFile(f); string(b) != "orig" {
+		t.Errorf("original changed: %s", b)
+	}
+}

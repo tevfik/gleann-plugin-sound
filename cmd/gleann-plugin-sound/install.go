@@ -14,10 +14,9 @@ import (
 // Supported audio/video extensions for document extraction.
 var audioExtensions = httpserver.SupportedExts
 
-// pluginEntry mirrors the gleann Plugin struct for JSON serialisation.
-// pluginEntry mirrors gleann's registry entry. Every field gleann knows must be
-// listed: install rewrites the whole file, and anything missing here would be
-// stripped from the other plugins' entries.
+// pluginEntry holds the fields this tool writes for its own entry. install
+// edits plugins.json as raw JSON, so fields that are not listed here (token,
+// ...) survive on every entry.
 type pluginEntry struct {
 	Name          string   `json:"name"`
 	URL           string   `json:"url"`
@@ -123,28 +122,40 @@ func installPlugin(cmd *cobra.Command, port int) error {
 	}
 	pluginsFile := filepath.Join(home, ".gleann", "plugins.json")
 
-	registry := pluginRegistry{Plugins: []pluginEntry{}}
-	if data, err := os.ReadFile(pluginsFile); err == nil {
-		if len(data) > 0 {
-			if err := json.Unmarshal(data, &registry); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: could not parse %s, creating fresh: %v\n", pluginsFile, err)
-				registry = pluginRegistry{Plugins: []pluginEntry{}}
+	// The registry is edited as raw JSON: gleann owns fields this tool does not
+	// know (token, ...), on every entry and at the top level, and a typed
+	// round-trip would silently drop them.
+	top := map[string]json.RawMessage{}
+	var rawEntries []json.RawMessage
+	if data, err := os.ReadFile(pluginsFile); err == nil && len(data) > 0 {
+		if err := json.Unmarshal(data, &top); err != nil {
+			return fmt.Errorf("%s is not valid JSON (%v); fix or remove it and run install again: refusing to overwrite the registry", pluginsFile, err)
+		} else if raw, ok := top["plugins"]; ok {
+			if err := json.Unmarshal(raw, &rawEntries); err != nil {
+				return fmt.Errorf("the \"plugins\" list in %s is malformed (%v); fix it and run install again: refusing to overwrite the registry", pluginsFile, err)
 			}
 		}
 	}
 
 	// Remove old entry if present (update).
 	// Also remove legacy "gleann-sound" entries and any plugin on the same port.
+	// The previous sound entry's unknown fields (e.g. token) carry over.
 	pluginURL := fmt.Sprintf("http://localhost:%d", port)
-	filtered := make([]pluginEntry, 0, len(registry.Plugins))
-	for _, p := range registry.Plugins {
-		if p.Name != "gleann-plugin-sound" && p.Name != "gleann-sound" && p.URL != pluginURL {
-			filtered = append(filtered, p)
+	kept := make([]json.RawMessage, 0, len(rawEntries)+1)
+	prev := map[string]json.RawMessage{}
+	for _, raw := range rawEntries {
+		var id struct{ Name, URL string }
+		_ = json.Unmarshal(raw, &id)
+		if id.Name == "gleann-plugin-sound" || id.Name == "gleann-sound" || id.URL == pluginURL {
+			if id.Name == "gleann-plugin-sound" {
+				_ = json.Unmarshal(raw, &prev)
+			}
+			continue
 		}
+		kept = append(kept, raw)
 	}
-	registry.Plugins = filtered
 
-	// Add new entry.
+	// Add new entry: our fields over whatever the previous entry held.
 	entry := pluginEntry{
 		Name:          "gleann-plugin-sound",
 		URL:           fmt.Sprintf("http://localhost:%d", port),
@@ -155,7 +166,25 @@ func installPlugin(cmd *cobra.Command, port int) error {
 		SchemaVersion: httpserver.SchemaVersion,
 		Timeout:       1800,
 	}
-	registry.Plugins = append(registry.Plugins, entry)
+	entryJSON, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("marshal plugin entry: %w", err)
+	}
+	var ours map[string]json.RawMessage
+	_ = json.Unmarshal(entryJSON, &ours)
+	for k, v := range ours {
+		prev[k] = v
+	}
+	merged, err := json.Marshal(prev)
+	if err != nil {
+		return fmt.Errorf("marshal plugin entry: %w", err)
+	}
+	kept = append(kept, merged)
+	pluginsJSON, err := json.Marshal(kept)
+	if err != nil {
+		return fmt.Errorf("marshal plugin list: %w", err)
+	}
+	top["plugins"] = pluginsJSON
 
 	// Ensure ~/.gleann/ exists.
 	if err := os.MkdirAll(filepath.Dir(pluginsFile), 0o755); err != nil {
@@ -163,11 +192,11 @@ func installPlugin(cmd *cobra.Command, port int) error {
 	}
 
 	// Write registry.
-	data, err := json.MarshalIndent(registry, "", "  ")
+	data, err := json.MarshalIndent(top, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal registry: %w", err)
 	}
-	if err := os.WriteFile(pluginsFile, data, 0o644); err != nil {
+	if err := writeFileAtomic(pluginsFile, data, 0o644); err != nil {
 		return fmt.Errorf("write plugins file: %w", err)
 	}
 
@@ -220,4 +249,47 @@ func replaceFlag(cmd []string, flag, value string) []string {
 		}
 	}
 	return append(cmd, flag, value)
+}
+
+// writeFileAtomic replaces path with data: it writes a temp file in the same
+// directory, gives it the existing file's mode (perm for a new file), and
+// renames it over the target. A symlink at path is followed, so the link
+// stays and its target is updated.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	if st, err := os.Stat(path); err == nil {
+		perm = st.Mode().Perm()
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpName) }
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		cleanup()
+		return err
+	}
+	return nil
 }

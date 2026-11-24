@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -68,11 +69,27 @@ type liveMsg struct {
 }
 
 func isLoopback(host string) bool {
-	if host == "localhost" {
+	// DNS names are case-insensitive and may carry a trailing root dot.
+	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
 		return true
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// originAllowed is the cross-site check for /live when no token protects it: a
+// browser sends Origin on WebSocket upgrades, and a page from another site must
+// not drive the local recogniser. A missing Origin (native clients) is allowed.
+func originAllowed(r *http.Request) bool {
+	o := r.Header.Get("Origin")
+	if o == "" {
+		return true
+	}
+	u, err := url.Parse(o)
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+	return isLoopback(u.Hostname())
 }
 
 // hasToken reports whether any access token is configured: the operator's
@@ -86,9 +103,14 @@ func (s *Server) authorized(r *http.Request) bool {
 	if !s.hasToken() {
 		return true
 	}
-	got := r.URL.Query().Get("token")
-	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
-		got = strings.TrimPrefix(h, "Bearer ")
+	// The query token exists for browsers, which cannot set headers on a
+	// WebSocket; no other route accepts it (URLs end up in logs).
+	var got string
+	if r.URL.Path == "/live" {
+		got = r.URL.Query().Get("token")
+	}
+	if h := r.Header.Get("Authorization"); len(h) > len("Bearer ") && strings.EqualFold(h[:len("Bearer ")], "Bearer ") {
+		got = h[len("Bearer "):]
 	}
 	ok := 0
 	for _, want := range []string{s.token, s.pluginToken} {
@@ -110,14 +132,16 @@ func hostIsLoopback(r *http.Request) bool {
 
 // guard protects every route except /health: a server bound to loopback only
 // serves requests addressed to a loopback Host (DNS rebinding), and when a
-// token is configured it must be presented.
+// token is configured it must be presented. A request that presents a valid
+// token is exempt from the Host check: DNS rebinding cannot know the token,
+// and a TLS reverse proxy forwards its public Host name.
 func (s *Server) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if isLoopback(s.host) && !hostIsLoopback(r) {
+		if isLoopback(s.host) && !hostIsLoopback(r) && !(s.hasToken() && s.authorized(r)) {
 			writeError(w, http.StatusForbidden, "Host header is not a loopback name")
 			return
 		}
@@ -142,6 +166,10 @@ func (s *Server) authorizedConfig(r *http.Request) bool {
 func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
 	if !s.authorized(r) {
 		writeError(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+	if !s.hasToken() && !originAllowed(r) {
+		writeError(w, http.StatusForbidden, "Origin is not a loopback name")
 		return
 	}
 	select {

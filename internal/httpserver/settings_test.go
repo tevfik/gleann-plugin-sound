@@ -139,11 +139,21 @@ func TestSettingsRequiresJSONAndToken(t *testing.T) {
 	if r, _ := http.Get(ts.URL + "/settings"); r.StatusCode != http.StatusUnauthorized {
 		t.Errorf("GET without token = %d", r.StatusCode)
 	}
-	if r, _ := http.Get(ts.URL + "/settings?token=s3cret"); r.StatusCode != 200 {
-		t.Errorf("GET with token = %d", r.StatusCode)
+	// The query token is for /live only.
+	if r, _ := http.Get(ts.URL + "/settings?token=s3cret"); r.StatusCode != http.StatusUnauthorized {
+		t.Errorf("GET with ?token= = %d, want 401", r.StatusCode)
 	}
-	if r := put(t, ts.URL+"/settings?token=s3cret", map[string]any{"language": "en"}, "text/plain"); r.StatusCode != http.StatusUnsupportedMediaType {
-		t.Errorf("PUT as text/plain = %d", r.StatusCode)
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/settings", nil)
+	req.Header.Set("Authorization", "Bearer s3cret")
+	if r, err := http.DefaultClient.Do(req); err != nil || r.StatusCode != 200 {
+		t.Errorf("GET with token = %v %v", r, err)
+	}
+	b, _ := json.Marshal(map[string]any{"values": map[string]any{"language": "en"}})
+	req, _ = http.NewRequest(http.MethodPut, ts.URL+"/settings", bytes.NewReader(b))
+	req.Header.Set("Authorization", "Bearer s3cret")
+	req.Header.Set("Content-Type", "text/plain")
+	if r, err := http.DefaultClient.Do(req); err != nil || r.StatusCode != http.StatusUnsupportedMediaType {
+		t.Errorf("PUT as text/plain = %v %v", r, err)
 	}
 	if r := put(t, ts.URL+"/settings", map[string]any{"language": "en"}, "application/json"); r.StatusCode != http.StatusUnauthorized {
 		t.Errorf("PUT without token = %d", r.StatusCode)

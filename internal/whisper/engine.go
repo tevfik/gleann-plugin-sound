@@ -27,7 +27,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os/exec"
 	"runtime"
 	"strings"
 	"sync"
@@ -401,26 +400,10 @@ func (e *Engine) ResetStream() {
 // TranscribeFile transcribes an audio/video file by first converting it to
 // 16 kHz mono WAV via ffmpeg, then running Whisper on the resulting PCM.
 func (e *Engine) TranscribeFile(ctx context.Context, filepath string) ([]core.Segment, error) {
-	// Use ffmpeg to decode any media format into raw 16-bit PCM.
-	cmd := exec.CommandContext(ctx,
-		"ffmpeg",
-		"-i", filepath,
-		"-ar", "16000",
-		"-ac", "1",
-		"-f", "s16le",
-		"-acodec", "pcm_s16le",
-		"-",
-	)
-	raw, err := cmd.Output()
+	// Shared decoder: honours the duration cap carried by ctx (core.WithMaxDecode).
+	pcm, err := core.DecodeFile(ctx, filepath)
 	if err != nil {
-		return nil, fmt.Errorf("whisper: ffmpeg decode failed: %w", err)
-	}
-
-	// Convert raw bytes to int16 samples.
-	nSamples := len(raw) / 2
-	pcm := make([]int16, nSamples)
-	for i := 0; i < nSamples; i++ {
-		pcm[i] = int16(uint16(raw[i*2]) | uint16(raw[i*2+1])<<8)
+		return nil, fmt.Errorf("whisper: %w", err)
 	}
 
 	return e.TranscribeStreamSegments(ctx, pcm)

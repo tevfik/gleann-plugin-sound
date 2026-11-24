@@ -29,7 +29,6 @@ import (
 	"log"
 	"math"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -703,24 +702,10 @@ func (e *Engine) ResetStream() {
 
 // TranscribeFile transcribes an audio/video file via ffmpeg → PCM → ONNX.
 func (e *Engine) TranscribeFile(ctx context.Context, filepath string) ([]core.Segment, error) {
-	cmd := exec.CommandContext(ctx,
-		"ffmpeg",
-		"-i", filepath,
-		"-ar", "16000",
-		"-ac", "1",
-		"-f", "s16le",
-		"-acodec", "pcm_s16le",
-		"-",
-	)
-	raw, err := cmd.Output()
+	// Shared decoder: honours the duration cap carried by ctx (core.WithMaxDecode).
+	pcm, err := core.DecodeFile(ctx, filepath)
 	if err != nil {
-		return nil, fmt.Errorf("onnx: ffmpeg decode failed: %w", err)
-	}
-
-	nSamples := len(raw) / 2
-	pcm := make([]int16, nSamples)
-	for i := 0; i < nSamples; i++ {
-		pcm[i] = int16(uint16(raw[i*2]) | uint16(raw[i*2+1])<<8)
+		return nil, fmt.Errorf("onnx: %w", err)
 	}
 
 	return e.TranscribeStreamSegments(ctx, pcm)

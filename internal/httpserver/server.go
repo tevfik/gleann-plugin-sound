@@ -37,7 +37,8 @@ import (
 
 // PluginVersion is reported by /info and compared by `update`. main replaces
 // it with the release tag stamped in by -ldflags "-X main.version=...".
-var PluginVersion = "1.0.0"
+// "dev" marks a build without a stamped version.
+var PluginVersion = "dev"
 
 const (
 	// PluginName is the registry name.
@@ -51,8 +52,13 @@ const (
 
 	// DefaultMaxDuration is the longest recording /convert accepts unless
 	// configured otherwise.
-	DefaultMaxDuration = 4 * time.Hour
+	DefaultMaxDuration = 2 * time.Hour
 )
+
+// probeTimeout bounds the duration probe on its own so a pathological file
+// cannot spend the whole request deadline there; a variable so tests can
+// shorten it.
+var probeTimeout = 30 * time.Second
 
 // Capabilities advertised to gleann.
 var Capabilities = []string{"audio-transcription", "document-extraction"}
@@ -77,7 +83,20 @@ func (s *Server) checkDuration(ctx context.Context, path string) (int, string) {
 	if s.maxDuration <= 0 {
 		return 0, ""
 	}
-	d, err := probeDuration(ctx, path)
+	pctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	d, err := probeDuration(pctx, path)
+	// A killed ffprobe/ffmpeg reports "signal: killed", not a context error, so
+	// decide from the contexts: the probe's own deadline (422) or a request that
+	// is already over (client gone, request deadline).
+	if err != nil {
+		if ctx.Err() != nil {
+			return http.StatusRequestTimeout, "request ended while reading the media duration"
+		}
+		if pctx.Err() != nil {
+			return http.StatusUnprocessableEntity, "timed out reading the media duration"
+		}
+	}
 	switch {
 	case err == nil:
 		if d > s.maxDuration {
@@ -92,6 +111,13 @@ func (s *Server) checkDuration(ctx context.Context, path string) (int, string) {
 		log.Printf("[plugin-serve] cannot probe duration: %v", err)
 	}
 	return 0, ""
+}
+
+// writeTooLong answers 413 when decoding crossed the duration cap although the
+// container declared a shorter (or no) duration.
+func (s *Server) writeTooLong(w http.ResponseWriter) {
+	writeError(w, http.StatusRequestEntityTooLarge,
+		fmt.Sprintf("decoded audio is longer than the limit of %s (the file's declared duration was wrong)", s.maxDuration))
 }
 
 // maxUploadBytes bounds the request body of /convert.
@@ -372,6 +398,8 @@ func (s *Server) handleConvert(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
 	defer cancel()
+	// Backstop for the declared-duration check: decoders stop at the cap.
+	ctx = core.WithMaxDecode(ctx, s.maxDuration)
 
 	if err := validateUpload(ctx, tmpPath); err != nil {
 		writeError(w, decodeStatus(err), err.Error())
@@ -388,6 +416,10 @@ func (s *Server) handleConvert(w http.ResponseWriter, r *http.Request) {
 		// the accurate model transcribes each piece (no streaming model needed).
 		pcm, err := core.DecodeFile(ctx, tmpPath)
 		if err != nil {
+			if errors.Is(err, core.ErrTooLong) {
+				s.writeTooLong(w)
+				return
+			}
 			writeError(w, decodeStatus(err), fmt.Sprintf("decode: %v", err))
 			return
 		}
@@ -412,6 +444,10 @@ func (s *Server) handleConvert(w http.ResponseWriter, r *http.Request) {
 		segments, err = engine.TranscribeFile(ctx, tmpPath)
 		s.mu.Unlock()
 		if err != nil {
+			if errors.Is(err, core.ErrTooLong) {
+				s.writeTooLong(w)
+				return
+			}
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("transcription failed: %v", err))
 			return
 		}
