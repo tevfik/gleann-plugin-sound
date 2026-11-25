@@ -38,7 +38,10 @@ func TestIdleSidecarDeathClearsAlive(t *testing.T) {
 	if !r.Alive() {
 		t.Fatal("fresh helper reported dead")
 	}
-	if err := r.h.cmd.Process.Signal(syscall.SIGKILL); err != nil {
+	r.sup.mu.Lock()
+	h := r.sup.h
+	r.sup.mu.Unlock()
+	if err := h.cmd.Process.Signal(syscall.SIGKILL); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(3 * time.Second)

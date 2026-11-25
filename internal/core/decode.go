@@ -145,6 +145,26 @@ type Refiner interface {
 	Close() error
 }
 
+// ErrRefinerUnavailable reports that the refiner's worker process died and no
+// replacement came up in time. The refiner supervises that process and keeps
+// restarting it in the background, so this is temporary: callers should back
+// off and try again (see RetryAfter), not treat the pass as failed input.
+var ErrRefinerUnavailable = errors.New("asr refiner unavailable")
+
+// RefinerHealth is implemented by a supervised refiner: it reports how it is
+// doing ("off", "up", "restarting" or "down") and how long a caller should
+// wait before sending again what it had to refuse. /health and /convert use
+// it, so a dead refiner is visible instead of turning into a stream of 500s.
+type RefinerHealth interface {
+	Status() string
+	RetryAfter() int
+}
+
+// RetryAfter is the number of seconds a caller should wait before sending the
+// request that got ErrRefinerUnavailable again; it is the supervision
+// backoff's lower bound, which is also where a restart realistically lands.
+const RetryAfter = 5
+
 // SpeakerLabeler names the speaker of a finished utterance. Name is empty when
 // the audio is too short to tell; score is the match confidence (cosine).
 type SpeakerLabeler interface {

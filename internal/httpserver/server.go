@@ -502,8 +502,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		// Honest dependencies: ffmpeg/ffprobe presence and version (probed
 		// at most once per depProbeTTL so /health stays fast).
 		"deps": s.dependencies(r.Context()),
-		// "off" (none configured), "up" (helper alive) or "down" (helper
-		// died; the S2 supervisor will add "restarting").
+		// "off" (none configured), "up" (helper alive), "restarting" (died,
+		// the supervisor is bringing it back) or "down" (given up).
 		"refiner": s.refinerState(),
 		"model":   map[string]bool{"loaded": s.modelLoaded.Load()},
 	})
@@ -514,6 +514,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) refinerState() string {
 	if s.refiner == nil {
 		return "off"
+	}
+	if h, ok := s.refiner.(core.RefinerHealth); ok {
+		return h.Status()
 	}
 	if a, ok := s.refiner.(interface{ Alive() bool }); ok && !a.Alive() {
 		return "down"
@@ -626,6 +629,11 @@ func (s *Server) handleConvert(w http.ResponseWriter, r *http.Request) {
 
 	var segments []core.Segment
 	if s.refiner != nil {
+		// A refiner that has given up restarting would refuse every piece:
+		// say so before spending CPU on the decode.
+		if s.refinerDownNow(w) {
+			return
+		}
 		// Offline path: Silero finds the speech, speaker turns are split and
 		// the accurate model transcribes each piece (no streaming model needed).
 		pcm, err := core.DecodeFile(ctx, tmpPath)
@@ -646,6 +654,11 @@ func (s *Server) handleConvert(w http.ResponseWriter, r *http.Request) {
 			pipeline.FileConfig{Corrector: s.corrector, Speakers: s.speakers})
 		closeVAD()
 		if err != nil {
+			// The supervision refusing work is the plugin's state, not the
+			// upload's fault: 503 + Retry-After, never a 500.
+			if s.refinerRefused(w, err) {
+				return
+			}
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("transcription failed: %v", err))
 			return
 		}
@@ -664,6 +677,10 @@ func (s *Server) handleConvert(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			if errors.Is(err, core.ErrTooLong) {
 				s.writeTooLong(w)
+				return
+			}
+			// A supervised engine whose helper died: temporary, not a 500.
+			if s.refinerRefused(w, err) {
 				return
 			}
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("transcription failed: %v", err))

@@ -13,6 +13,17 @@
 
 ### Fixed
 
+- The ASR refiner's sidecar is now supervised (S2): the existing reaper triggers a background restart with
+  exponential back-off (1 s doubling, capped at 60 s), a call that hit the death waits a short window and is
+  retried once on the replacement, and after three failed restarts the refiner is `down` and stops spawning.
+  Restarts never happen after Shutdown/Close, back-off goroutines exit on Close, and the replaced process is
+  always reaped.
+- `/health` reports `refiner: "restarting"` while the sidecar is being brought back (besides `up`, `down`, `off`).
+- `/convert` answers `503` with `Retry-After` (`code: refiner_unavailable`) while the refiner is restarting or
+  down, instead of a `500` or a dead-pipe error; a `down` refiner is refused before the upload is decoded.
+- A refiner call whose helper died without a reply could return an empty transcript with no error; it now
+  returns an error or the retried answer.
+- `Refiner.Refine` no longer silently drops audio shorter than 0.1 s (the pipeline already skips turns under 0.5 s).
 - Shutdown now finishes inside the host's stop grace: drain is grace minus 1 s (half of it for graces under 2 s),
   the hard exit fires at the grace instead of 2 s after the host's SIGKILL, and the refiner/engine close is
   bounded to 800 ms; a second release after an abandoned one no longer waits again.

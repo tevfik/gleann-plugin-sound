@@ -41,9 +41,19 @@ type Engine struct {
 	model    string
 	attRight int // lookahead menu entry {0,3,6,13} = 0/240/480/1040 ms
 
-	mu    sync.Mutex
-	lang  string
-	batch *helper // lazily started, for whole-file transcription
+	// batch supervises the helper used for whole-file (batch) passes. It is
+	// reaped and restarted when it dies, and a pass that runs into the death
+	// comes back as core.ErrRefinerUnavailable rather than a dead pipe: 'R',
+	// the 'A' chunks and 'F' only make sense as one run on one helper, so the
+	// pass is handed back and re-run on the replacement. The pointer never
+	// changes, which is what lets a reader hold on to it across a death.
+	batch *supervisor
+	// mu is that supervisor's own lock. Language and supervision state form a
+	// single consistency domain, so a reader that takes e.mu sees exactly what
+	// the supervision sees. No Engine method may take it around a supervisor
+	// call - they are the same lock.
+	mu   *sync.Mutex
+	lang string
 }
 
 var (
@@ -66,13 +76,23 @@ func NewEngine(model string) (*Engine, error) {
 			att = n
 		}
 	}
-	return &Engine{model: model, attRight: att, lang: "auto"}, nil
+	e := &Engine{
+		model:    model,
+		attRight: att,
+		lang:     "auto",
+		batch:    &supervisor{mode: "stream", model: model, lang: "auto", attRight: att},
+	}
+	e.mu = &e.batch.mu
+	return e, nil
 }
 
 func (e *Engine) SetLanguage(lang string) {
 	e.mu.Lock()
+	defer e.mu.Unlock()
 	e.lang = Locale(lang)
-	e.mu.Unlock()
+	// The batch helper picks the language up on its next start; one already
+	// running keeps the language it loaded with, as it did before.
+	e.batch.lang = e.lang
 }
 
 func (e *Engine) language() string {
@@ -145,29 +165,22 @@ func (e *Engine) TranscribeStreamSegments(ctx context.Context, pcm []int16) ([]c
 	if len(pcm) == 0 {
 		return nil, nil
 	}
-	e.mu.Lock()
-	if e.batch == nil {
-		h, err := startHelper("stream", e.model, e.lang, e.attRight)
-		if err != nil {
-			e.mu.Unlock()
-			return nil, err
-		}
-		e.batch = h
+	// The pass is one unit on one helper: callNow never waits out a restart,
+	// so a death inside it returns the sentinel at once and the caller re-runs
+	// the whole pass on the replacement instead of getting half a transcript.
+	if _, err := e.batch.callNow(ctx, 'R', nil); err != nil {
+		return nil, err
 	}
-	h := e.batch
-	e.mu.Unlock()
-
-	_, _ = h.call('R', nil)
 	const chunk = 16000 // 1 s
 	for i := 0; i < len(pcm); i += chunk {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if _, err := h.call('A', pcm[i:min(i+chunk, len(pcm))]); err != nil {
+		if _, err := e.batch.callNow(ctx, 'A', pcm[i:min(i+chunk, len(pcm))]); err != nil {
 			return nil, err
 		}
 	}
-	r, err := h.call('F', nil)
+	r, err := e.batch.callNow(ctx, 'F', nil)
 	if err != nil {
 		return nil, err
 	}
@@ -194,12 +207,8 @@ func (e *Engine) TranscribeFile(ctx context.Context, path string) ([]core.Segmen
 	return e.TranscribeStreamSegments(ctx, pcm)
 }
 
+// Close stops the supervision and shuts the batch helper down. It does not
+// take e.mu: that is the supervisor's own lock, and stopping wants it back.
 func (e *Engine) Close() error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.batch != nil {
-		_ = e.batch.close()
-		e.batch = nil
-	}
-	return nil
+	return e.batch.close()
 }
