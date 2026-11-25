@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v1.2.1] — 2026-11-26
+
 ### Security
 
 - `/convert` staging moved from the shared `/tmp/gleann-plugin-sound` to a per-user
@@ -48,7 +50,7 @@
   clears the liveness flag).
 - Lint: removed the unused `blockingEngine.err` test field (staticcheck U1000).
 
-## v1.2.0 (unreleased)
+## [v1.2.0] — 2026-11-24
 
 ### Security
 
