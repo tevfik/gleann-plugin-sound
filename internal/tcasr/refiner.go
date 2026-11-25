@@ -59,6 +59,11 @@ func (r *Refiner) Refine(ctx context.Context, pcm []int16) (string, error) {
 	return strings.TrimSpace(rep.Text), nil
 }
 
+// Alive reports whether the sidecar behind this refiner is still healthy.
+// /health uses it to report "down" instead of "up"; it reads an atomic
+// flag, so it never waits on the helper's mutex during a long Refine.
+func (r *Refiner) Alive() bool { return r.h.alive.Load() }
+
 func (r *Refiner) Close() error {
 	var err error
 	r.once.Do(func() { err = r.h.close() })

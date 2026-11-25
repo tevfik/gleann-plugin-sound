@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tevfik/gleann-plugin-sound/internal/audio"
@@ -132,14 +133,29 @@ func extSupported(ext string) bool {
 	return false
 }
 
-// decodeStatus maps a decode failure to an HTTP status: a missing ffmpeg is a
-// server problem (500), anything else means the uploaded file is not usable
-// audio (422).
+// decodeStatus maps a decode failure to an HTTP status: a missing ffmpeg or
+// ffprobe is a dependency problem of the plugin host (503 + install hint,
+// contract code dependency_missing), anything else means the uploaded file
+// is not usable audio (422).
 func decodeStatus(err error) int {
 	if errors.Is(err, exec.ErrNotFound) {
-		return http.StatusInternalServerError
+		return http.StatusServiceUnavailable
 	}
 	return http.StatusUnprocessableEntity
+}
+
+// ffmpegMissingHint is the operator-facing fix for a 503 dependency_missing.
+const ffmpegMissingHint = "ffmpeg is not installed on the plugin host: /convert needs ffmpeg and ffprobe. " +
+	"Install it (sudo apt install ffmpeg / sudo dnf install ffmpeg / brew install ffmpeg) and retry."
+
+// writeDependencyMissing answers the 503 with the plan-12 contract code.
+func writeDependencyMissing(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"error": ffmpegMissingHint,
+		"code":  "dependency_missing",
+	})
 }
 
 // EngineFactory creates a Transcriber on demand. Used for lazy model loading.
@@ -174,6 +190,36 @@ type Server struct {
 	stopped  bool
 	closeEng sync.Once
 	engErr   error
+	// closeRef guarantees the refiner's sidecar helper is released exactly
+	// once, on Shutdown or Close, before the process exits (S3).
+	closeRef sync.Once
+	refErr   error
+
+	// S3 shutdown parity: rootCtx is the BaseContext of every request;
+	// Shutdown cancels it when the drain deadline passes, which revokes the
+	// contexts of parked handlers (and the ffmpeg children they started with
+	// exec.CommandContext) even on hijacked connections.
+	rootCtx    context.Context
+	rootCancel context.CancelFunc
+
+	// uploads tracks the in-flight /convert temp files so Shutdown can
+	// remove those of handlers parked past the drain deadline.
+	uploads uploadSet
+
+	// fallbackDir is a private os.MkdirTemp staging dir, used only when the
+	// per-user staging dir fails its safety checks.
+	fallbackMu  sync.Mutex
+	fallbackDir string
+
+	// release bookkeeping: an abandoned (wedged) release is not waited for
+	// again by the next caller.
+	relMu        sync.Mutex
+	relDone      chan error
+	relAbandoned bool
+
+	// S4 dependency advertising.
+	deps        *depsCache
+	modelLoaded atomic.Bool
 }
 
 // SetVADFactory overrides how /live sessions get their voice activity detector
@@ -193,13 +239,17 @@ func (s *Server) SetCorrector(c *core.Corrector) { s.corrector = c }
 // The engine is loaded lazily on the first /convert request so that the
 // health endpoint responds immediately (within the PluginManager's 10s timeout).
 func New(factory EngineFactory, language string, port int) *Server {
+	rootCtx, rootCancel := context.WithCancel(context.Background())
 	return &Server{
-		factory:  factory,
-		language: language,
-		port:     port,
-		host:     "127.0.0.1",
-		openVAD:  audio.OpenVAD,
-		liveSlot: make(chan struct{}, DefaultMaxLive),
+		factory:    factory,
+		language:   language,
+		port:       port,
+		host:       "127.0.0.1",
+		openVAD:    audio.OpenVAD,
+		liveSlot:   make(chan struct{}, DefaultMaxLive),
+		rootCtx:    rootCtx,
+		rootCancel: rootCancel,
+		deps:       &depsCache{},
 	}
 }
 
@@ -246,38 +296,138 @@ func (s *Server) Serve() error {
 	mux.Handle("/", s.Handler())
 
 	addr := net.JoinHostPort(s.host, fmt.Sprint(s.port))
-	srv := &http.Server{Addr: addr, Handler: mux}
+	// Listen explicitly (rather than ListenAndServe) so the stale-upload
+	// sweep can run the instant the port is ours and before the first
+	// connection is accepted.
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+		// BaseContext roots every request context in rootCtx: Shutdown
+		// revokes rootCtx at the drain deadline, cancelling handlers that
+		// outlived the drain — including hijacked /live connections, whose
+		// request context would otherwise only die with the socket.
+		BaseContext: func(net.Listener) context.Context { return s.rootCtx },
+	}
 	s.srvMu.Lock()
 	if s.stopped {
 		s.srvMu.Unlock()
+		_ = ln.Close()
 		return nil
 	}
 	s.srv = srv
 	s.srvMu.Unlock()
 
+	// S3 sweep: the listen succeeded, so any file in this port's staging
+	// dir is a leftover of a killed instance of the same port.
+	if _, err := s.ensureUploadDir(); err != nil {
+		log.Printf("[plugin-serve] upload staging dir refused, not sweeping: %v", err)
+	} else {
+		s.sweepUploads()
+	}
+
 	log.Printf("[plugin-serve] gleann-plugin-sound HTTP plugin on %s", addr)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
 }
 
 // Shutdown stops accepting requests, lets in-flight ones finish (until ctx
-// expires, then closes them), and releases the engine.
+// expires — then it cancels their contexts, closes the connections and
+// removes their upload files), and releases the refiner helper and the
+// engine before returning so a subsequent hard exit leaks no sidecar.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.srvMu.Lock()
 	s.stopped = true
 	srv := s.srv
 	s.srvMu.Unlock()
+	// At the drain deadline (the ctx's deadline) revoke the root context of
+	// every in-flight request: handlers parked in a hung engine and the
+	// ffmpeg children they started die here, not when the host SIGKILLs us.
+	stopWatch := make(chan struct{})
+	defer close(stopWatch)
+	go func() {
+		select {
+		case <-ctx.Done():
+			s.rootCancel()
+		case <-stopWatch:
+		}
+	}()
+	var errs []error
 	if srv != nil {
 		if err := srv.Shutdown(ctx); err != nil {
 			_ = srv.Close()
+			errs = append(errs, fmt.Errorf("drain: %w", err))
 		}
 	}
-	return s.closeEngine()
+	s.rootCancel()
+	s.uploads.drop() // uploads of handlers that could not unwind in time
+	defer s.removeFallback()
+	errs = append(errs, s.release())
+	return errors.Join(errs...)
 }
 
-// Close stops the listener immediately and releases the engine. Idempotent.
+// closeGrace bounds how long Shutdown/Close wait for refiner and engine
+// Close calls to unwind. A well-behaved engine returns the moment the root
+// context is revoked (its ffmpeg children were started with
+// exec.CommandContext and die with it). A wedged engine would otherwise
+// deadlock the shutdown against the s.mu its parked handler still holds —
+// and abandoning the wait leaks nothing that outlives the process: the
+// native sidecar loops on stdin and exits when this process closes the
+// pipe by exiting. A variable so tests can shorten it.
+var closeGrace = 800 * time.Millisecond
+
+// BoundedClose runs fn and waits at most closeGrace for it. A Close wedged on
+// an unfinished transcription is abandoned (nil is returned and logged): it
+// leaks nothing that outlives the process. Used by release and by callers that
+// close a refiner themselves (plugin-serve's deferred Close).
+func BoundedClose(name string, fn func() error) error {
+	done := make(chan error, 1)
+	go func() { done <- fn() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(closeGrace):
+		log.Printf("[plugin-serve] %s Close still blocked by an unfinished transcription; abandoning the wait", name)
+		return nil
+	}
+}
+
+// release closes the refiner helper and the engine, waiting at most
+// closeGrace for an unfinished transcription to unwind. Once a release was
+// abandoned, later calls return at once instead of waiting again.
+func (s *Server) release() error {
+	s.relMu.Lock()
+	if s.relAbandoned {
+		s.relMu.Unlock()
+		return nil
+	}
+	if s.relDone == nil {
+		s.relDone = make(chan error, 1)
+		done := s.relDone
+		go func() { done <- errors.Join(s.closeRefiner(), s.closeEngine()) }()
+	}
+	done := s.relDone
+	s.relMu.Unlock()
+	select {
+	case err := <-done:
+		done <- err // let other waiters see the result too
+		return err
+	case <-time.After(closeGrace):
+		s.relMu.Lock()
+		s.relAbandoned = true
+		s.relMu.Unlock()
+		log.Println("[plugin-serve] refiner/engine Close still blocked by an unfinished transcription; abandoning the wait (the sidecar exits with this process)")
+		return nil
+	}
+}
+
+// Close stops the listener immediately and releases the refiner helper and
+// the engine. Idempotent.
 func (s *Server) Close() error {
 	s.srvMu.Lock()
 	s.stopped = true
@@ -286,7 +436,10 @@ func (s *Server) Close() error {
 	if srv != nil {
 		_ = srv.Close()
 	}
-	return s.closeEngine()
+	s.rootCancel()
+	s.uploads.drop()
+	defer s.removeFallback()
+	return s.release()
 }
 
 func (s *Server) closeEngine() error {
@@ -296,8 +449,21 @@ func (s *Server) closeEngine() error {
 		if s.engine != nil {
 			s.engErr = s.engine.Close()
 		}
+		s.modelLoaded.Store(false)
 	})
 	return s.engErr
+}
+
+// closeRefiner releases the /live refinement sidecar (S3). plugin_serve.go's
+// defer r.Close() is a backstop; this is what runs on the Shutdown path so a
+// hard exit cannot leave a native helper behind.
+func (s *Server) closeRefiner() error {
+	s.closeRef.Do(func() {
+		if s.refiner != nil {
+			s.refErr = s.refiner.Close()
+		}
+	})
+	return s.refErr
 }
 
 // getEngine returns the transcription engine, initialising it on first call.
@@ -316,6 +482,7 @@ func (s *Server) getEngine() (core.Transcriber, error) {
 		engine.SetLanguage(s.language)
 	}
 	s.engine = engine
+	s.modelLoaded.Store(true)
 	log.Println("[plugin-serve] model loaded successfully")
 	return s.engine, nil
 }
@@ -328,7 +495,30 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"version":        PluginVersion,
 		"schema_version": SchemaVersion,
 		"capabilities":   Capabilities,
+		// S4: seconds a single /convert may take. gleann's PluginManager
+		// keeps its 120 s ProcessStructured timeout unless the plugin
+		// advertises a longer one, while this server allows 30 minutes.
+		"timeout": int(requestTimeout / time.Second),
+		// Honest dependencies: ffmpeg/ffprobe presence and version (probed
+		// at most once per depProbeTTL so /health stays fast).
+		"deps": s.dependencies(r.Context()),
+		// "off" (none configured), "up" (helper alive) or "down" (helper
+		// died; the S2 supervisor will add "restarting").
+		"refiner": s.refinerState(),
+		"model":   map[string]bool{"loaded": s.modelLoaded.Load()},
 	})
+}
+
+// refinerState reports the refinement sidecar for /health without touching
+// the helper's mutex, so a busy Refine call cannot stall /health.
+func (s *Server) refinerState() string {
+	if s.refiner == nil {
+		return "off"
+	}
+	if a, ok := s.refiner.(interface{ Alive() bool }); ok && !a.Alive() {
+		return "down"
+	}
+	return "up"
 }
 
 func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
@@ -354,6 +544,14 @@ func (s *Server) handleConvert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// S4 honest fail-fast: if the (cached) dependency probe says ffmpeg is
+	// absent, answer 503 with an install hint instead of accepting an
+	// upload that every later step would fail on.
+	if !s.dependencies(r.Context())["ffmpeg"].OK {
+		writeDependencyMissing(w)
+		return
+	}
+
 	// The 256 MB argument of ParseMultipartForm is only the in-memory
 	// threshold; the body itself is capped so an oversized upload is refused
 	// instead of being spooled to disk and decoded (P-05).
@@ -375,19 +573,31 @@ func (s *Server) handleConvert(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// Save to temp file preserving extension (ffmpeg needs it for format detection).
+	// Save to a staging file under TempDir/gleann-plugin-sound/port-N/,
+	// preserving the extension (ffmpeg needs it for format detection). The
+	// per-port dir lets the startup sweep clean up after a SIGKILLed
+	// instance of this port without touching other ports (S3).
 	ext := strings.ToLower(filepath.Ext(header.Filename))
 	if !extSupported(ext) {
 		writeError(w, http.StatusUnsupportedMediaType, fmt.Sprintf("unsupported file extension %q (supported: %s)", ext, strings.Join(SupportedExts, " ")))
 		return
 	}
-	tmp, err := os.CreateTemp("", "gleann-plugin-sound-*"+ext)
+	dir, err := s.stagingDir()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("create upload staging dir: %v", err))
+		return
+	}
+	tmp, err := os.CreateTemp(dir, "upload-*"+ext)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("create temp file: %v", err))
 		return
 	}
 	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
+	s.uploads.add(tmpPath)
+	defer func() {
+		_ = os.Remove(tmpPath)
+		s.uploads.remove(tmpPath)
+	}()
 
 	if _, err := io.Copy(tmp, file); err != nil {
 		tmp.Close()
@@ -402,7 +612,11 @@ func (s *Server) handleConvert(w http.ResponseWriter, r *http.Request) {
 	ctx = core.WithMaxDecode(ctx, s.maxDuration)
 
 	if err := validateUpload(ctx, tmpPath); err != nil {
-		writeError(w, decodeStatus(err), err.Error())
+		if st := decodeStatus(err); st == http.StatusServiceUnavailable {
+			writeDependencyMissing(w)
+		} else {
+			writeError(w, st, err.Error())
+		}
 		return
 	}
 	if status, msg := s.checkDuration(ctx, tmpPath); status != 0 {
@@ -418,6 +632,10 @@ func (s *Server) handleConvert(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			if errors.Is(err, core.ErrTooLong) {
 				s.writeTooLong(w)
+				return
+			}
+			if decodeStatus(err) == http.StatusServiceUnavailable {
+				writeDependencyMissing(w)
 				return
 			}
 			writeError(w, decodeStatus(err), fmt.Sprintf("decode: %v", err))

@@ -113,7 +113,7 @@ Register this plugin with 'gleann-plugin-sound install' before use.`,
 				if rerr != nil {
 					return fmt.Errorf("refiner: %w", rerr)
 				}
-				defer r.Close()
+				defer func() { _ = httpserver.BoundedClose("refiner", r.Close) }()
 				srv.SetRefiner(r)
 				log.Printf("[plugin-serve] /live refinement on (%s)", refineModel)
 			}
@@ -130,16 +130,26 @@ Register this plugin with 'gleann-plugin-sound install' before use.`,
 			}
 			defer srv.Close()
 
-			// Graceful shutdown on SIGINT/SIGTERM.
+			// Graceful shutdown on SIGINT/SIGTERM, aligned with the stop
+			// grace the host gave us (GLEANN_PLUGIN_STOP_GRACE): drain
+			// inside it with 1s of slack to release the ASR helper, and
+			// exit hard right at the grace, when the host would SIGKILL
+			// (which would leak the native sidecar). The old fixed 20s drain / 25s wait
+			// outlived the host's 10s patience.
+			grace := stopGraceFromEnv(os.Getenv("GLEANN_PLUGIN_STOP_GRACE"))
+			drain, hardExit := shutdownDeadlines(grace)
+			log.Printf("[plugin-serve] stop grace %s: draining %s, hard exit %s", grace, drain, hardExit)
 			sigCh := make(chan os.Signal, 1)
 			signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 			shutdownDone := make(chan struct{})
 			go func() {
 				<-sigCh
 				log.Println("[plugin-serve] shutting down...")
-				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+				ctx, cancel := context.WithTimeout(context.Background(), drain)
 				defer cancel()
-				_ = srv.Shutdown(ctx)
+				if err := srv.Shutdown(ctx); err != nil {
+					log.Printf("[plugin-serve] shutdown: %v", err)
+				}
 				close(shutdownDone)
 			}()
 
@@ -148,7 +158,13 @@ Register this plugin with 'gleann-plugin-sound install' before use.`,
 			}
 			select {
 			case <-shutdownDone:
-			case <-time.After(25 * time.Second):
+			case <-time.After(hardExit):
+				// A handler parked past the drain deadline (Shutdown already
+				// cancelled its context and closed its connection). Return
+				// anyway: the deferred srv.Close() releases the refiner
+				// helper and the engine instead of waiting for the host's
+				// SIGKILL to do it.
+				log.Printf("[plugin-serve] drain unfinished at %s; exiting now", hardExit)
 			}
 			return nil
 		},
@@ -218,4 +234,39 @@ func parseMaxDuration(v, source string) (time.Duration, error) {
 		return 0, fmt.Errorf("invalid %s %q (use e.g. 2h, 90m, or 0 to disable)", source, v)
 	}
 	return d, nil
+}
+
+// defaultStopGrace matches the stop grace gleann's PluginManager gives a
+// plugin between SIGINT and SIGKILL when GLEANN_PLUGIN_STOP_GRACE is unset or
+// invalid.
+const defaultStopGrace = 10 * time.Second
+
+// stopGraceFromEnv interprets GLEANN_PLUGIN_STOP_GRACE exactly as the host
+// (gleann pkg/gleann pluginStopGraceValue) does: a positive Go duration
+// ("30s", "500ms"). Empty, unparseable (including a bare number without a
+// unit, which the host ignores too) and non-positive values give the default.
+func stopGraceFromEnv(v string) time.Duration {
+	if v == "" {
+		return defaultStopGrace
+	}
+	if d, err := time.ParseDuration(v); err == nil && d > 0 {
+		return d
+	}
+	log.Printf("[plugin-serve] ignoring GLEANN_PLUGIN_STOP_GRACE=%q (use a duration like 10s), using %s", v, defaultStopGrace)
+	return defaultStopGrace
+}
+
+// shutdownDeadlines turns the host's stop grace into a drain deadline
+// (grace - 1s: the 1s of slack is for releasing the ASR helper and returning;
+// half the grace when it is shorter than 2s) and a hard-exit deadline at the
+// grace itself, since the host SIGKILLs then and a later exit is dead code.
+func shutdownDeadlines(grace time.Duration) (drain, hardExit time.Duration) {
+	if grace <= 0 {
+		grace = defaultStopGrace
+	}
+	drain = grace - time.Second
+	if drain < grace/2 {
+		drain = grace / 2
+	}
+	return drain, grace
 }

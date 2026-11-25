@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -75,6 +76,19 @@ type helper struct {
 	mu    sync.Mutex
 	dead  error
 	label string
+	// alive mirrors dead for lock-free readers (/health): a Refine call can
+	// hold mu for a long time, and a health check must never wait on it.
+	alive atomic.Bool
+	// exited is closed by the reaper goroutine once the process is gone.
+	exited chan struct{}
+	stdout io.Closer
+}
+
+// markDead records the sidecar's death. Callers hold h.mu.
+func (h *helper) markDead(err error) error {
+	h.alive.Store(false)
+	h.dead = err
+	return err
 }
 
 func startHelper(mode, model, lang string, attRight int) (*helper, error) {
@@ -101,7 +115,16 @@ func startHelper(mode, model, lang string, attRight int) (*helper, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start %s: %w", bin, err)
 	}
-	h := &helper{cmd: cmd, in: in, out: bufio.NewReaderSize(stdout, 1<<16), label: filepath.Base(model)}
+	h := &helper{cmd: cmd, in: in, out: bufio.NewReaderSize(stdout, 1<<16), label: filepath.Base(model), exited: make(chan struct{}), stdout: stdout}
+	h.alive.Store(true)
+	// Reaper: the only waiter on the process. It flips alive the moment the
+	// sidecar dies, even idle, so /health never reports a dead helper as up.
+	// Process.Wait (not cmd.Wait) leaves the pipes to close().
+	go func() {
+		_, _ = cmd.Process.Wait()
+		h.alive.Store(false)
+		close(h.exited)
+	}()
 
 	// Loading a 2 GB model can take a while; the first line says it is ready.
 	type res struct {
@@ -121,7 +144,7 @@ func startHelper(mode, model, lang string, attRight int) (*helper, error) {
 	case r := <-ch:
 		if r.err != nil || !r.r.Ready {
 			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
+			<-h.exited
 			if r.err == nil {
 				r.err = errors.New("unexpected first message")
 			}
@@ -129,7 +152,7 @@ func startHelper(mode, model, lang string, attRight int) (*helper, error) {
 		}
 	case <-time.After(3 * time.Minute):
 		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		<-h.exited
 		return nil, fmt.Errorf("asr helper timed out loading %s", model)
 	}
 	log.Printf("[tc] %s helper ready: %s", mode, h.label)
@@ -149,13 +172,11 @@ func (h *helper) call(op byte, pcm []int16) (reply, error) {
 		_ = binary.Write(&buf, binary.LittleEndian, pcm)
 	}
 	if _, err := h.in.Write(buf.Bytes()); err != nil {
-		h.dead = fmt.Errorf("asr helper died: %w", err)
-		return reply{}, h.dead
+		return reply{}, h.markDead(fmt.Errorf("asr helper died: %w", err))
 	}
 	line, err := h.out.ReadBytes('\n')
 	if err != nil {
-		h.dead = fmt.Errorf("asr helper died: %w", err)
-		return reply{}, h.dead
+		return reply{}, h.markDead(fmt.Errorf("asr helper died: %w", err))
 	}
 	var r reply
 	if err := json.Unmarshal(line, &r); err != nil {
@@ -170,18 +191,18 @@ func (h *helper) call(op byte, pcm []int16) (reply, error) {
 func (h *helper) close() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.alive.Store(false)
 	if h.dead == nil {
 		_, _ = h.in.Write([]byte{'Q'})
 		h.dead = errors.New("closed")
 	}
 	_ = h.in.Close()
-	done := make(chan struct{})
-	go func() { _ = h.cmd.Wait(); close(done) }()
 	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
+	case <-h.exited:
+	case <-time.After(500 * time.Millisecond):
 		_ = h.cmd.Process.Kill()
-		<-done
+		<-h.exited
 	}
+	_ = h.stdout.Close()
 	return nil
 }

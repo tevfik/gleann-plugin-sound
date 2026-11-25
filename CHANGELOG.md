@@ -1,5 +1,28 @@
 # Changelog
 
+## [Unreleased]
+
+### Security
+
+- `/convert` staging moved from the shared `/tmp/gleann-plugin-sound` to a per-user
+  `<tmp>/gleann-plugin-sound-<uid>/port-<n>` (user name on Windows). The root and the port dir are
+  Lstat-checked before use: a real directory, owned by the current user, no group/other write. If a check
+  fails the startup sweep is skipped (logged) and uploads go to a fresh private temp dir. The sweep no longer
+  follows symlinks: it deletes only regular files named `upload-*` and never recurses, so another local user
+  can no longer plant a symlink that makes the plugin delete files elsewhere.
+
+### Fixed
+
+- Shutdown now finishes inside the host's stop grace: drain is grace minus 1 s (half of it for graces under 2 s),
+  the hard exit fires at the grace instead of 2 s after the host's SIGKILL, and the refiner/engine close is
+  bounded to 800 ms; a second release after an abandoned one no longer waits again.
+- `GLEANN_PLUGIN_STOP_GRACE` is parsed like the host: a positive Go duration (a bare number or a value under
+  1 s is no longer treated differently), default 10 s.
+- A wedged refiner no longer blocks `plugin-serve` from returning: its deferred close is bounded like `release()`.
+- `/health` reports `refiner: "down"` for a sidecar that died while idle (a reaper goroutine on the process
+  clears the liveness flag).
+- Lint: removed the unused `blockingEngine.err` test field (staticcheck U1000).
+
 ## v1.2.0 (unreleased)
 
 ### Security

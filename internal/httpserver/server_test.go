@@ -43,16 +43,23 @@ func newServer(segs ...core.Segment) *httptest.Server {
 
 func upload(t *testing.T, url string) *http.Response {
 	t.Helper()
+	resp, err := postUpload(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+// postUpload sends a tiny /convert upload without touching t, so tests can
+// call it from goroutines that expect the server to pull the connection out
+// from under them.
+func postUpload(url string) (*http.Response, error) {
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
 	fw, _ := mw.CreateFormFile("file", "meeting.mp3")
 	_, _ = fw.Write(tinyWAV())
 	mw.Close()
-	resp, err := http.Post(url+"/convert", mw.FormDataContentType(), &body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return resp
+	return http.Post(url+"/convert", mw.FormDataContentType(), &body)
 }
 
 func TestCapabilitiesMatchGleannRouting(t *testing.T) {
@@ -127,8 +134,10 @@ func TestConvertNoSpeech(t *testing.T) {
 }
 
 func TestDecodeStatus(t *testing.T) {
-	if got := decodeStatus(fmt.Errorf("x: %w", exec.ErrNotFound)); got != http.StatusInternalServerError {
-		t.Errorf("missing ffmpeg: status = %d, want 500", got)
+	// S4: a missing dependency is the plugin host's problem to fix, not the
+	// upload's: 503 (with an install hint), never a generic 500.
+	if got := decodeStatus(fmt.Errorf("x: %w", exec.ErrNotFound)); got != http.StatusServiceUnavailable {
+		t.Errorf("missing ffmpeg: status = %d, want 503", got)
 	}
 	if got := decodeStatus(fmt.Errorf("ffmpeg cannot decode this file")); got != http.StatusUnprocessableEntity {
 		t.Errorf("bad file: status = %d, want 422", got)
@@ -220,6 +229,21 @@ func TestSettingsRejectsForeignHost(t *testing.T) {
 func TestMain(m *testing.M) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		validateUpload = func(context.Context, string) error { return nil }
+		// The fake-engine tests need no ffmpeg; make S4's dependency probe
+		// and the /convert dependency gate pretend it is installed.
+		lookPath = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+		depVersion = func(context.Context, string) (string, error) { return "ffmpeg version fake", nil }
 	}
-	os.Exit(m.Run())
+	// S3: keep the /convert staging area out of the shared system temp dir
+	// for the whole run; tests that assert on it override uploadRoot with
+	// t.TempDir() anyway.
+	staging, err := os.MkdirTemp("", "gps-httpserver-tests-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "staging dir:", err)
+		os.Exit(1)
+	}
+	uploadRoot = staging
+	code := m.Run()
+	os.RemoveAll(staging)
+	os.Exit(code)
 }
