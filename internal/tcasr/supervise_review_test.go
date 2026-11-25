@@ -111,3 +111,88 @@ func TestUnavailableTextIsStateSpecific(t *testing.T) {
 		t.Errorf("down text = %q", got)
 	}
 }
+
+// killIdle kills the refiner's helper while no call is in progress and waits
+// for the supervisor to settle: "up" again, or "down".
+func killIdle(t *testing.T, r *Refiner) string {
+	t.Helper()
+	killRefiner(t, r, false)
+	var st string
+	waitFor(t, 5*time.Second, func() bool { st = r.Status(); return st == "up" || st == "down" }, "no settle after an idle kill")
+	return st
+}
+
+// Idle deaths spaced past the healthy window never count as failed starts: no
+// request failed, so the helper must not go terminal however often the
+// process is killed (below the hourly idle budget).
+func TestIdleDeathsAfterHealthyPeriodDoNotGoDown(t *testing.T) {
+	helperFake(t)
+	r, err := NewRefiner(helperModel(t), "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	fastSup(r.sup)
+	r.sup.mu.Lock()
+	r.sup.healthyFor, r.sup.idleMax = 40*time.Millisecond, 100
+	r.sup.mu.Unlock()
+	for i := 0; i < defaultMaxDown*2; i++ { // twice the failed-start budget
+		time.Sleep(80 * time.Millisecond) // healthy: past the window, no call made
+		if st := killIdle(t, r); st != "up" {
+			t.Fatalf("idle kill %d left the helper %q", i+1, st)
+		}
+	}
+	if _, err := r.Refine(context.Background(), pcm3()); err != nil {
+		t.Fatalf("refiner unusable after idle deaths: %v", err)
+	}
+}
+
+// A rapid idle crash loop is still bounded: at most idleMax idle restarts in
+// the window, then down.
+func TestRapidIdleCrashLoopStillGoesDown(t *testing.T) {
+	helperFake(t)
+	r, err := NewRefiner(helperModel(t), "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	fastSup(r.sup)
+	const budget = 5
+	r.sup.mu.Lock()
+	r.sup.healthyFor, r.sup.idleMax = 10*time.Millisecond, budget
+	r.sup.mu.Unlock()
+	survived := 0
+	for i := 0; i < budget*3; i++ {
+		time.Sleep(30 * time.Millisecond)
+		if killIdle(t, r) == "down" {
+			break
+		}
+		survived++
+	}
+	if r.Status() != "down" {
+		t.Fatal("an idle crash loop never went down")
+	}
+	if survived != budget {
+		t.Errorf("idle restarts before down = %d, want exactly %d", survived, budget)
+	}
+}
+
+// Deaths early in a helper's life still count, idle or not (covered by the
+// flapping test); a death during a call counts too.
+func TestDeathDuringCallCountsAsFailure(t *testing.T) {
+	s := &supervisor{mode: "offline", state: stateUp, maxDown: 3, healthyFor: time.Millisecond}
+	h := &helper{}
+	s.h, s.proven, s.upSince, s.inflight = h, true, time.Now().Add(-time.Hour), 1
+	hold := make(chan struct{})
+	defer close(hold)
+	s.sleepFn = func(time.Duration) error { <-hold; return nil } // keep the restart pending
+	s.spawnHook = func(*supervisor) (*helper, error) { return nil, errors.New("no") }
+	s.died(h)
+	defer s.close()
+	s.mu.Lock()
+	f := s.fails
+	s.mu.Unlock()
+	if f != 1 {
+		t.Errorf("fails after a death during a call = %d, want 1", f)
+	}
+}

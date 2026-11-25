@@ -338,3 +338,254 @@ func TestRunLive_RefinesPerSpeakerTurn(t *testing.T) {
 		t.Errorf("refiner should have seen each turn separately: %v", ref.calls)
 	}
 }
+
+// dyingRefiner answers its first `ok` calls and fails every later one, like a
+// refiner sidecar that was killed mid-session.
+type dyingRefiner struct {
+	mu    sync.Mutex
+	n, ok int
+}
+
+func (d *dyingRefiner) Refine(context.Context, []int16) (string, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.n++
+	if d.n > d.ok {
+		return "", fmt.Errorf("helper process exited")
+	}
+	return fmt.Sprintf("refined-%d", d.n), nil
+}
+func (d *dyingRefiner) Close() error { return nil }
+
+// A refiner that dies mid-session must not leave holes: every utterance has
+// either a refined event or an explicit unrefined one carrying the live text.
+func TestRunLive_RefineFailureIsExplicit(t *testing.T) {
+	st := &fakeStream{}
+	cfg := DefaultLiveConfig()
+	cfg.Refiner = &dyingRefiner{ok: 1}
+	evs := run(t, st, cfg, quiet(300), tone(2000), quiet(1500), tone(2000), quiet(1500), tone(2000), quiet(1500))
+
+	fin := finals(evs)
+	if len(fin) != 3 {
+		t.Fatalf("want 3 utterances, got %d", len(fin))
+	}
+	refined, raw := map[int]LiveEvent{}, map[int]LiveEvent{}
+	for _, e := range evs {
+		switch {
+		case e.Refined:
+			refined[e.Seq] = e
+		case e.Unrefined:
+			raw[e.Seq] = e
+		}
+	}
+	for _, f := range fin {
+		_, r := refined[f.Seq]
+		u, w := raw[f.Seq]
+		if !r && !w {
+			t.Errorf("utterance %d has neither a refined nor an unrefined event", f.Seq)
+		}
+		if w && (u.Text != f.Text || u.Text == "") {
+			t.Errorf("utterance %d unrefined text %q, want the live text %q", f.Seq, u.Text, f.Text)
+		}
+	}
+	if len(refined) != 1 || len(raw) != 2 {
+		t.Errorf("refined=%d unrefined=%d, want 1 and 2", len(refined), len(raw))
+	}
+}
+
+type threeTurns struct{ splitLabeler }
+
+func (threeTurns) Turns(pcm []int16) []core.SpeakerTurn {
+	d := time.Duration(len(pcm)) * time.Second / SampleRate
+	return []core.SpeakerTurn{
+		{End: 2 * time.Second, Name: "A"},
+		{Start: 2 * time.Second, End: 4 * time.Second, Name: "B"},
+		{Start: 4 * time.Second, End: d, Name: "C"},
+	}
+}
+
+// failMiddle fails its second call.
+type failMiddle struct{ n int }
+
+func (f *failMiddle) Refine(context.Context, []int16) (string, error) {
+	f.n++
+	if f.n == 2 {
+		return "", fmt.Errorf("helper process exited")
+	}
+	return fmt.Sprintf("refined-%d", f.n), nil
+}
+func (f *failMiddle) Close() error { return nil }
+
+// One failed turn in a multi-turn utterance: no per-turn refined parts at all,
+// one whole-utterance unrefined event with the full live text, so every word
+// reaches the client exactly once.
+func TestRunLive_MultiTurnFailureEmitsWholeUtteranceOnce(t *testing.T) {
+	cfg := DefaultLiveConfig()
+	cfg.Speakers = threeTurns{}
+	cfg.Refiner = &failMiddle{}
+	evs := run(t, &fakeStream{}, cfg, tone(7000), quiet(1500))
+	var fin LiveEvent
+	var out []LiveEvent
+	for _, e := range evs {
+		if e.Final {
+			fin = e
+		}
+		if e.Refined || e.Unrefined {
+			out = append(out, e)
+		}
+	}
+	if len(out) != 1 || out[0].Refined || !out[0].Unrefined {
+		t.Fatalf("want exactly one unrefined whole-utterance event, got %+v", out)
+	}
+	if out[0].Text != fin.Text || out[0].Text == "" {
+		t.Errorf("text %q, want the full live text %q", out[0].Text, fin.Text)
+	}
+	if out[0].Part != 0 || out[0].Parts != 1 {
+		t.Errorf("part/parts = %d/%d, want 0/1", out[0].Part, out[0].Parts)
+	}
+}
+
+// slowFirst delays its first call, so later utterances would overtake it.
+type slowFirst struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (f *slowFirst) Refine(context.Context, []int16) (string, error) {
+	f.mu.Lock()
+	f.n++
+	n := f.n
+	f.mu.Unlock()
+	if n == 1 {
+		time.Sleep(150 * time.Millisecond)
+	}
+	return fmt.Sprintf("refined-%d", n), nil
+}
+func (f *slowFirst) Close() error { return nil }
+
+// Refined and unrefined events leave in utterance order, even when a later
+// utterance is turned away from a full queue while an earlier one is slow.
+func TestRunLive_RefinementEventsKeepUtteranceOrder(t *testing.T) {
+	cfg := DefaultLiveConfig()
+	cfg.Refiner = &slowFirst{}
+	cfg.RefineQueue = 1
+	var audio [][]int16
+	audio = append(audio, quiet(300))
+	for i := 0; i < 5; i++ {
+		audio = append(audio, tone(1500), quiet(1500))
+	}
+	evs := run(t, &fakeStream{}, cfg, audio...)
+	last, n := -1, 0
+	for _, e := range evs {
+		if !e.Refined && !e.Unrefined {
+			continue
+		}
+		n++
+		if e.Seq < last {
+			t.Errorf("utterance %d emitted after %d", e.Seq, last)
+		}
+		last = e.Seq
+	}
+	if n != 5 {
+		t.Errorf("%d refinement events, want one per utterance (5)", n)
+	}
+}
+
+type shortMiddle struct{ splitLabeler }
+
+func (shortMiddle) Turns(pcm []int16) []core.SpeakerTurn {
+	d := time.Duration(len(pcm)) * time.Second / SampleRate
+	return []core.SpeakerTurn{
+		{End: 2 * time.Second, Name: "A"},
+		{Start: 2 * time.Second, End: 2300 * time.Millisecond, Name: "B"},
+		{Start: 2300 * time.Millisecond, End: d, Name: "C"},
+	}
+}
+
+// A speaker turn under 0.5 s is skipped on purpose; that is not a failure.
+// Its audio joins the neighbouring turn, so its words come from the refiner.
+func TestRunLive_ShortTurnIsNotAFailure(t *testing.T) {
+	cfg := DefaultLiveConfig()
+	cfg.Speakers = shortMiddle{}
+	ref := &fakeRefiner{}
+	cfg.Refiner = ref
+	evs := run(t, &fakeStream{}, cfg, tone(7000), quiet(1500))
+	var parts []LiveEvent
+	for _, e := range evs {
+		if e.Unrefined {
+			t.Fatalf("unrefined event for an utterance whose only issue is a short turn: %+v", e)
+		}
+		if e.Refined {
+			parts = append(parts, e)
+		}
+	}
+	if len(parts) != 2 || parts[0].Parts != 2 || parts[1].Part != 1 {
+		t.Fatalf("want two refined parts, got %+v", parts)
+	}
+	if parts[0].End != parts[1].Start && parts[1].Start-parts[0].End > time.Millisecond {
+		t.Errorf("gap between parts: %v then %v", parts[0].End, parts[1].Start)
+	}
+	if len(ref.calls) != 2 {
+		t.Errorf("refiner calls = %d, want 2", len(ref.calls))
+	}
+}
+
+// stuckFirst blocks its first call until released; later calls answer.
+type stuckFirst struct {
+	mu      sync.Mutex
+	n       int
+	release chan struct{}
+}
+
+func (f *stuckFirst) Refine(context.Context, []int16) (string, error) {
+	f.mu.Lock()
+	f.n++
+	n := f.n
+	f.mu.Unlock()
+	if n == 1 {
+		<-f.release
+	}
+	return fmt.Sprintf("refined-%d", n), nil
+}
+func (f *stuckFirst) Close() error { return nil }
+
+// One refine call that never returns must not hold back later utterances:
+// all five get exactly one event, in order, the stuck one unrefined.
+func TestRunLive_StuckRefineDoesNotBlockLaterUtterances(t *testing.T) {
+	ref := &stuckFirst{release: make(chan struct{})}
+	cfg := DefaultLiveConfig()
+	cfg.Refiner = ref
+	cfg.RefineTimeout = 150 * time.Millisecond
+	cfg.RefineDrain = 3 * time.Second
+	audio := [][]int16{quiet(300)}
+	for i := 0; i < 5; i++ {
+		audio = append(audio, tone(1500), quiet(1500))
+	}
+	done := make(chan []LiveEvent, 1)
+	go func() { done <- run(t, &fakeStream{}, cfg, audio...) }()
+	time.AfterFunc(1500*time.Millisecond, func() { close(ref.release) }) // the late result
+	var evs []LiveEvent
+	select {
+	case evs = <-done:
+	case <-time.After(8 * time.Second):
+		close(ref.release)
+		t.Fatal("RunLive did not finish")
+	}
+	var got []LiveEvent
+	for _, e := range evs {
+		if e.Refined || e.Unrefined {
+			got = append(got, e)
+		}
+	}
+	if len(got) != 5 {
+		t.Fatalf("refinement events = %d, want 5 (one per utterance): %+v", len(got), got)
+	}
+	for i, e := range got {
+		if e.Seq != i {
+			t.Errorf("event %d is for utterance %d", i, e.Seq)
+		}
+	}
+	if !got[0].Unrefined || got[0].Text == "" {
+		t.Errorf("the stuck utterance must be unrefined with its live text: %+v", got[0])
+	}
+}

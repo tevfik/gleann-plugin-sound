@@ -13,6 +13,20 @@
 
 ### Fixed
 
+- `/live`: when the refiner fails for an utterance (sidecar killed or restarting, queue full) the slot is no
+  longer silent. The `refined` message is sent with `"refined": false` and the utterance's unrefined live text
+  (the full text of the utterance); for multi-speaker utterances the refined parts are sent only when every
+  turn was refined, otherwise one whole-utterance `"refined": false` message replaces them. Successful
+  refinements now carry `"refined": true`. `refined` messages leave in utterance order (a fallback never
+  overtakes an earlier utterance still being refined), and a speaker turn under 0.5 s is merged into its
+  neighbour instead of making the utterance unrefined. New `LiveConfig.RefineQueue` (default 16)
+  and `LiveConfig.RefineTimeout` (default 10 s per utterance, from when it is queued): a stuck refine call
+  releases that utterance with its unrefined live text, later utterances proceed in order, and a late result
+  is dropped. Documented in the live protocol comment.
+- A sidecar killed while idle no longer ends up permanently `down` without any request failing. Only deaths
+  during a call, or before the helper has answered a call and stayed up 30 s, count toward the three-failure
+  terminal budget. Idle deaths after a healthy period restart with back-off and are rate limited to 6 per
+  hour, after which the refiner goes `down`, so a crash loop is still bounded.
 - The ASR refiner's sidecar is now supervised (S2): the existing reaper triggers a background restart with
   exponential back-off (1 s doubling, capped at 60 s), a call that hit the death waits a short window and is
   retried once on the replacement, and after three failed restarts the refiner is `down` and stops spawning.

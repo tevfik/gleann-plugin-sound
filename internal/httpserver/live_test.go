@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -198,3 +199,89 @@ func (loudVAD) IsSpeech(p []int16) bool {
 	return false
 }
 func (loudVAD) Reset() {}
+
+// dyingRefiner answers its first `ok` calls, then fails like a killed sidecar.
+type dyingRefiner struct {
+	mu    sync.Mutex
+	n, ok int
+}
+
+func (d *dyingRefiner) Refine(context.Context, []int16) (string, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.n++
+	if d.n > d.ok {
+		return "", fmt.Errorf("helper process exited")
+	}
+	return "better", nil
+}
+func (d *dyingRefiner) Close() error { return nil }
+
+// The refiner dies during a /live session: every utterance still gets exactly
+// one "refined" message, "refined": true or an explicit false with the live text.
+func TestLiveRefinerDeathLeavesNoGap(t *testing.T) {
+	eng := &liveEngine{langs: make(chan string, 8)}
+	s := New(func() (core.Transcriber, error) { return eng, nil }, "tr", 0)
+	if err := s.SetListen("127.0.0.1", "", 2); err != nil {
+		t.Fatal(err)
+	}
+	s.SetVADFactory(func() (core.VADProvider, func()) { return loudVAD{}, func() {} })
+	s.SetRefiner(&dyingRefiner{ok: 1})
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	c, _, err := dial(t, ts, "?lang=en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	for u := 0; u < 3; u++ {
+		for i := 0; i < 2000; i += 100 {
+			_ = c.WriteMessage(websocket.BinaryMessage, tonePCM(100))
+		}
+		for i := 0; i < 1200; i += 100 {
+			_ = c.WriteMessage(websocket.BinaryMessage, make([]byte, 100*16*2))
+		}
+	}
+	_ = c.WriteJSON(liveMsg{Type: "end"})
+
+	finals, refs := map[int]liveMsg{}, map[int]liveMsg{}
+	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
+	for {
+		var m liveMsg
+		if err := c.ReadJSON(&m); err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if m.Type == "final" {
+			finals[m.Seq] = m
+		}
+		if m.Type == "refined" {
+			if m.Refined == nil {
+				t.Fatalf("refined message without the refined flag: %+v", m)
+			}
+			refs[m.Seq] = m
+		}
+		if m.Type == "done" {
+			break
+		}
+	}
+	if len(finals) != 3 {
+		t.Fatalf("finals = %d, want 3", len(finals))
+	}
+	nraw := 0
+	for seq, f := range finals {
+		r, ok := refs[seq]
+		if !ok {
+			t.Errorf("utterance %d has no refined message (silent gap)", seq)
+			continue
+		}
+		if !*r.Refined {
+			nraw++
+			if r.Text != strings.TrimSpace(f.Text) || r.Text == "" {
+				t.Errorf("utterance %d raw text %q, want the final text %q", seq, r.Text, f.Text)
+			}
+		}
+	}
+	if nraw != 2 {
+		t.Errorf("unrefined messages = %d, want 2", nraw)
+	}
+}

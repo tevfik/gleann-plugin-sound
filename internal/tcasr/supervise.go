@@ -32,6 +32,12 @@ import (
 //     that cannot afford to wait, as the streaming batch pass does - get the
 //     sentinel immediately, so one dying helper cannot stall the request
 //     loop.
+//   - A helper that dies while idle after a healthy period (up for
+//     healthyFor, or one that has answered a call) did not fail any request:
+//     it restarts with back-off and does not count toward "down". A crash
+//     loop is still bounded: more than idleMax such deaths inside an hour
+//     end in "down". Deaths during a call, or before the helper has proven
+//     itself, count as failed starts as below.
 //   - Repeatedly failing restarts back off exponentially and end in the
 //     terminal "down" state: /health then reports the refiner down with a
 //     long Retry-After, and the model is not loaded over and over on a
@@ -57,6 +63,13 @@ const (
 	defaultMaxDown = 3               // failed restarts before the terminal state
 	// downRetryAfter is the Retry-After (seconds) sent in the terminal state.
 	downRetryAfter = 3600
+	// defaultHealthy is how long a helper must stay up, idle, before its
+	// death no longer counts as a failed start.
+	defaultHealthy = 30 * time.Second
+	// defaultIdleMax idle deaths per idleWindow are restarted; one more
+	// goes down, so a crash loop is bounded.
+	defaultIdleMax = 6
+	idleWindow     = time.Hour
 )
 
 // How a caller that found no live helper should treat the automatic restart.
@@ -98,11 +111,22 @@ type supervisor struct {
 	// helpers that died before answering a single call (a helper that prints
 	// ready and then crashes is not a successful restart). It is reset only
 	// when a helper has answered one call (proven), never by a spawn alone.
-	fails      int
-	proven     bool // the installed helper has answered a call
-	maxDown    int  // fails at which the helper goes terminal
-	starting   bool // a cold start is spawning outside the lock
-	loop       bool // a restart pass is running
+	fails    int
+	proven   bool // the installed helper has answered a call
+	upSince  time.Time
+	inflight int     // calls running on the installed helper
+	callDied *helper // helper whose pipe broke under a call
+	// Idle deaths (no call running, helper up for healthyFor or proven) do
+	// not count as failures; they are rate limited instead. idleDeaths holds
+	// the times inside idleWindow, idleMax is how many are tolerated.
+	idleDeaths []time.Time
+	idleBack   int // extra back-off steps from recent idle deaths
+	healthyFor time.Duration
+	idleMax    int
+	nowFn      func() time.Time // test seam for the clock
+	maxDown    int              // fails at which the helper goes terminal
+	starting   bool             // a cold start is spawning outside the lock
+	loop       bool             // a restart pass is running
 	closed     bool
 	ready      chan struct{} // closed and replaced on every state/h change
 	stop       chan struct{} // closed to interrupt the back-off sleep (lazily)
@@ -128,6 +152,27 @@ func (s *supervisor) downLimit() int {
 		return s.maxDown
 	}
 	return defaultMaxDown
+}
+
+func (s *supervisor) healthy() time.Duration {
+	if s.healthyFor > 0 {
+		return s.healthyFor
+	}
+	return defaultHealthy
+}
+
+func (s *supervisor) idleLimit() int {
+	if s.idleMax > 0 {
+		return s.idleMax
+	}
+	return defaultIdleMax
+}
+
+func (s *supervisor) now() time.Time {
+	if s.nowFn != nil {
+		return s.nowFn()
+	}
+	return time.Now()
 }
 
 func (s *supervisor) backoffOf(fails int) time.Duration {
@@ -284,6 +329,7 @@ func (s *supervisor) installLocked(h *helper) (armed, adopted bool) {
 	// fails is deliberately kept: it is reset by markProven, once the helper
 	// has answered a call.
 	s.h, s.state, s.last, s.proven = h, stateUp, nil, false
+	s.upSince, s.inflight, s.callDied = s.now(), 0, nil
 	armed = h.setOnExit(s.died)
 	s.fireLocked()
 	return armed, true
@@ -308,8 +354,29 @@ func (s *supervisor) died(dead *helper) {
 		return // already detached by close() or replaced
 	}
 	s.h = nil
-	if !s.proven && !s.closed {
-		// It died without ever answering a call: that is a failed start,
+	duringCall := s.inflight > 0 || s.callDied == dead
+	s.inflight, s.callDied = 0, nil
+	now := s.now()
+	idle := !duringCall && (s.proven || now.Sub(s.upSince) >= s.healthy())
+	switch {
+	case s.closed:
+	case idle:
+		// Nothing failed: the process was lost between requests after a
+		// healthy period (an OOM kill, an operator). Restart with back-off,
+		// but bound a crash loop by a per-hour budget instead.
+		recent := s.idleDeaths[:0]
+		for _, at := range s.idleDeaths {
+			if now.Sub(at) < idleWindow {
+				recent = append(recent, at)
+			}
+		}
+		s.idleDeaths = append(recent, now)
+		s.idleBack = len(s.idleDeaths) - 1
+		if len(s.idleDeaths) > s.idleLimit() {
+			s.state = stateDown
+		}
+	default:
+		// It died during a call or before proving itself: a failed start,
 		// however well it loaded, so the back-off escalates and the count
 		// moves toward the terminal state.
 		s.fails++
@@ -367,7 +434,7 @@ func (s *supervisor) restartLoop() {
 			s.mu.Unlock()
 			return
 		}
-		d, sleep := s.backoffOf(s.fails), s.sleepFn
+		d, sleep := s.backoffOf(s.fails+s.idleBack), s.sleepFn
 		s.mu.Unlock()
 
 		if sleep != nil {
@@ -561,8 +628,14 @@ func (s *supervisor) run(ctx context.Context, policy int, op byte, pcm []int16) 
 	if err != nil {
 		return reply{}, err
 	}
+	s.mu.Lock()
+	if s.h == hp {
+		s.inflight++
+	}
+	s.mu.Unlock()
 	rep, err := hp.call(op, pcm)
 	if err == nil {
+		s.endCall(hp, false)
 		s.markProven(hp)
 		return rep, nil
 	}
@@ -571,9 +644,11 @@ func (s *supervisor) run(ctx context.Context, policy int, op byte, pcm []int16) 
 	// the honest one and no restart is warranted.
 	if hp.deadErr() == nil {
 		if gone, _ := hp.died(); !gone {
+			s.endCall(hp, false)
 			return rep, err
 		}
 	}
+	s.endCall(hp, true)
 	// The pipe broke under this call, but the reaper may not have collected
 	// the process yet: until it has, the supervisor still counts it as the
 	// live helper. Wait for the reaper (killing a process that closed its
@@ -601,6 +676,21 @@ func (s *supervisor) run(ctx context.Context, policy int, op byte, pcm []int16) 
 		return rep, err // no replacement: report the original failure
 	}
 	return hp2.call(op, pcm)
+}
+
+// endCall closes the in-flight accounting of one call; broke records that the
+// helper's pipe died under it, which the reaper's hook may see only later.
+func (s *supervisor) endCall(hp *helper, broke bool) {
+	s.mu.Lock()
+	if s.h == hp {
+		if broke {
+			s.callDied = hp
+		}
+		if s.inflight > 0 {
+			s.inflight--
+		}
+	}
+	s.mu.Unlock()
 }
 
 // markProven records that hp answered a call: from then on a death of it

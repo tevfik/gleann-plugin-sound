@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +35,14 @@ type LiveConfig struct {
 	// RefineDrain bounds how long RunLive waits for queued refinements when
 	// it ends. Default 30 s.
 	RefineDrain time.Duration
+	// RefineQueue is how many finished utterances may wait for the refiner.
+	// Default 16; one that does not fit gets an Unrefined event.
+	RefineQueue int
+	// RefineTimeout bounds how long an utterance's refinement may take,
+	// counted from when it is queued. After it the utterance is released
+	// with an Unrefined event and a late refiner result is dropped, so one
+	// stuck call cannot hold back later utterances. Default 10 s.
+	RefineTimeout time.Duration
 	// Stats, if set, is filled in while RunLive runs (read it after RunLive
 	// returns). It tells a silent microphone from a recogniser that heard
 	// nothing.
@@ -64,6 +73,11 @@ type LiveEvent struct {
 	Text    string // finalised text of the utterance so far
 	Final   bool   // the utterance has ended; Text is complete
 	Refined bool   // Text is the refiner's better transcript of utterance Seq (Final is false)
+	// Unrefined marks the refiner's slot for utterance Seq as not filled: a
+	// refine call failed (for any speaker turn) or the job was dropped. It is
+	// one event for the whole utterance (Part 0, Parts 1) and Text is the
+	// utterance's live transcript. Refined is false on these events.
+	Unrefined bool
 	// Part/Parts: when speakers answered each other inside one utterance the
 	// refined transcript arrives as several events, one per speaker turn.
 	Part, Parts int
@@ -104,6 +118,12 @@ func RunLive(ctx context.Context, stream core.LiveStream, vad core.VADProvider,
 	if cfg.MaxUtterance <= 0 {
 		cfg.MaxUtterance = def.MaxUtterance
 	}
+	if cfg.RefineQueue <= 0 {
+		cfg.RefineQueue = 16
+	}
+	if cfg.RefineTimeout <= 0 {
+		cfg.RefineTimeout = 10 * time.Second
+	}
 	if cfg.RefineDrain <= 0 {
 		cfg.RefineDrain = 30 * time.Second
 	}
@@ -120,21 +140,81 @@ func RunLive(ctx context.Context, stream core.LiveStream, vad core.VADProvider,
 		userOn(ev)
 	}
 
+	// Refinement results leave in utterance order: an utterance's event(s),
+	// refined or unrefined, are held until every earlier utterance has
+	// released its own. Every utterance releases exactly once (refined,
+	// failed, dropped from a full queue or never queued), so nothing waits
+	// forever.
+	var ordMu sync.Mutex
+	nextOut := 0
+	held := map[int][]LiveEvent{}
+	done := map[int]bool{}           // seq already released: later releases are dropped
+	timers := map[int]*time.Timer{}  // refine deadlines of queued utterances
+	fallbacks := map[int]LiveEvent{} // what each armed utterance releases on timeout
+	releaseLocked := func(seq int, evs ...LiveEvent) {
+		if done[seq] {
+			return // a late result after the deadline: never emit twice
+		}
+		done[seq] = true
+		if t := timers[seq]; t != nil {
+			t.Stop()
+		}
+		delete(timers, seq)
+		delete(fallbacks, seq)
+		held[seq] = evs
+		for {
+			e, ok := held[nextOut]
+			if !ok {
+				return
+			}
+			delete(held, nextOut)
+			nextOut++
+			for _, ev := range e {
+				on(ev)
+			}
+		}
+	}
+	release := func(seq int, evs ...LiveEvent) {
+		ordMu.Lock()
+		defer ordMu.Unlock()
+		releaseLocked(seq, evs...)
+	}
+	isDone := func(seq int) bool {
+		ordMu.Lock()
+		defer ordMu.Unlock()
+		return done[seq]
+	}
+	// arm starts the refine deadline of a queued utterance.
+	arm := func(seq int, fb LiveEvent) {
+		ordMu.Lock()
+		defer ordMu.Unlock()
+		fallbacks[seq] = fb
+		timers[seq] = time.AfterFunc(cfg.RefineTimeout, func() {
+			log.Printf("[live] refine utterance %d timed out after %v; keeping its live transcript", seq, cfg.RefineTimeout)
+			release(seq, fb)
+		})
+	}
+
 	type refineJob struct {
 		seq        int
 		pcm        []int16
 		start, end time.Duration
 		speaker    string
 		score      float64
+		text       string // the utterance's live transcript, the fallback
+		fb         LiveEvent
 	}
 	var jobs chan refineJob
 	var workerDone chan struct{}
 	if cfg.Refiner != nil {
-		jobs = make(chan refineJob, 16)
+		jobs = make(chan refineJob, cfg.RefineQueue)
 		workerDone = make(chan struct{})
 		go func() {
 			defer close(workerDone)
 			for j := range jobs {
+				if isDone(j.seq) {
+					continue // its deadline passed while it waited
+				}
 				// People answering each other without a pause end up in one
 				// utterance; split the audio at speaker changes so each
 				// speaker's words are refined (and labelled) separately.
@@ -144,23 +224,61 @@ func RunLive(ctx context.Context, stream core.LiveStream, vad core.VADProvider,
 						turns = t
 					}
 				}
-				for p, tn := range turns {
+				// Parts are held back until every turn is refined: if any turn
+				// fails the client gets one whole-utterance Unrefined event
+				// with the full live text instead, so each word arrives
+				// exactly once (the live text has no per-turn split).
+				// A turn under half a second is not worth a call of its own:
+				// its audio joins the neighbouring turn, whose refined text
+				// then covers its words (not a failure).
+				type span struct {
+					a, b int
+					tn   core.SpeakerTurn
+				}
+				var spans []span
+				carry := -1
+				for _, tn := range turns {
 					a, b := samples(tn.Start), min(samples(tn.End), len(j.pcm))
+					if carry >= 0 {
+						a = carry
+					}
 					if b-a < SampleRate/2 {
+						if n := len(spans); n > 0 {
+							spans[n-1].b = b
+							spans[n-1].tn.End = tn.End
+							carry = -1
+						} else if carry < 0 {
+							carry = a
+						}
 						continue
 					}
-					text, err := cfg.Refiner.Refine(context.Background(), j.pcm[a:b])
+					carry = -1
+					tn.Start = dur(a)
+					spans = append(spans, span{a, b, tn})
+				}
+				parts := make([]LiveEvent, 0, len(spans))
+				ok := len(spans) > 0 // whole utterance under 0.5 s: keep its live text
+				for p, sp := range spans {
+					text, err := cfg.Refiner.Refine(context.Background(), j.pcm[sp.a:sp.b])
 					if err != nil {
 						log.Printf("[live] refine utterance %d: %v", j.seq, err)
-						continue
+						ok = false
+						break
 					}
-					if text = strings.TrimSpace(cfg.Corrector.Apply(text)); text != "" {
-						on(LiveEvent{
-							Seq: j.seq, Text: text, Refined: true, Part: p, Parts: len(turns),
-							Start: j.start + tn.Start, End: j.start + tn.End, Speaker: tn.Name, Score: tn.Score,
-						})
+					if text = strings.TrimSpace(cfg.Corrector.Apply(text)); text == "" {
+						ok = false
+						break
 					}
+					parts = append(parts, LiveEvent{
+						Seq: j.seq, Text: text, Refined: true, Part: p, Parts: len(spans),
+						Start: j.start + sp.tn.Start, End: j.start + sp.tn.End, Speaker: sp.tn.Name, Score: sp.tn.Score,
+					})
 				}
+				if !ok {
+					release(j.seq, j.fb)
+					continue
+				}
+				release(j.seq, parts...)
 			}
 		}()
 	}
@@ -173,6 +291,18 @@ func RunLive(ctx context.Context, stream core.LiveStream, vad core.VADProvider,
 		case <-workerDone:
 		case <-time.After(cfg.RefineDrain):
 			log.Printf("[live] gave up waiting for queued refinements after %v", cfg.RefineDrain)
+		}
+		// Whatever is still pending keeps its live transcript, and no timer
+		// fires after RunLive has returned.
+		ordMu.Lock()
+		defer ordMu.Unlock()
+		seqs := make([]int, 0, len(fallbacks))
+		for seq := range fallbacks {
+			seqs = append(seqs, seq)
+		}
+		sort.Ints(seqs)
+		for _, seq := range seqs {
+			releaseLocked(seq, fallbacks[seq])
 		}
 	}()
 
@@ -241,12 +371,21 @@ func RunLive(ctx context.Context, stream core.LiveStream, vad core.VADProvider,
 				Final: true, Start: dur(uttStart), End: dur(clock), Speaker: who, Score: score,
 			})
 			if jobs != nil && len(uttPCM) > 0 {
+				live := strings.TrimSpace(text.String())
+				fb := LiveEvent{
+					Seq: seq, Text: live, Unrefined: true, Parts: 1,
+					Start: dur(uttStart), End: dur(clock), Speaker: who, Score: score,
+				}
+				arm(seq, fb)
 				select {
-				case jobs <- refineJob{seq: seq, pcm: uttPCM, start: dur(uttStart), end: dur(clock), speaker: who, score: score}:
+				case jobs <- refineJob{seq: seq, pcm: uttPCM, start: dur(uttStart), end: dur(clock), speaker: who, score: score, text: live, fb: fb}:
 					uttPCM = nil
 				default:
 					log.Printf("[live] refinement queue full; utterance %d keeps its live transcript", seq)
+					release(seq, fb)
 				}
+			} else if jobs != nil {
+				release(seq) // nothing to refine; let later utterances through
 			}
 			seq++
 			if cfg.Stats != nil {

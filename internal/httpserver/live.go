@@ -39,6 +39,23 @@ const DefaultMaxLive = 4
 //	         {"type":"refined","seq":0,"text":"..."}  later, if the server has a
 //	                refiner model: a more accurate transcript of utterance seq
 //	                (several messages with "part"/"parts" when speakers took turns)
+//	                Every "refined" message carries "refined": true. Refined
+//	                parts of a multi-speaker utterance are sent only if every
+//	                turn was refined. When the refiner fails for any turn (it
+//	                died, restarted, or its queue was full) one message is sent
+//	                for the whole utterance instead, with "refined": false and
+//	                "text" = the full unrefined live text, "part":0,"parts":1.
+//	                A client therefore receives every word of an utterance
+//	                exactly once: from the "refined" parts, or from that one
+//	                fallback message. "refined" messages leave in utterance
+//	                order ("seq" never goes backwards): a later utterance's
+//	                message waits for the earlier ones, but never longer than
+//	                10 s per utterance from when it ended: after that the
+//	                utterance gets its "refined": false fallback and a late
+//	                refiner result is dropped (one message per utterance). A speaker turn under
+//	                0.5 s is merged into its neighbour, not treated as a
+//	                failure; an utterance that is itself under 0.5 s gets the
+//	                "refined": false fallback.
 //	         {"type":"done"}  after "end" or a normal close
 //	         {"type":"error","message":"..."}
 //
@@ -66,6 +83,9 @@ type liveMsg struct {
 	Message    string  `json:"message,omitempty"`
 	SampleRate int     `json:"sample_rate,omitempty"`
 	Format     string  `json:"format,omitempty"`
+	// Refined is set on "refined" messages only: true for the refiner's
+	// transcript, false when the refiner could not supply one for that slot.
+	Refined *bool `json:"refined,omitempty"`
 }
 
 func isLoopback(host string) bool {
@@ -297,8 +317,9 @@ func (s *Server) serveLive(parent context.Context, conn *websocket.Conn, stream 
 	cfg.Speakers = s.speakers
 	err := pipeline.RunLive(ctx, stream, vad, audioCh, cfg, func(ev pipeline.LiveEvent) {
 		m := liveMsg{Seq: ev.Seq, Start: ev.Start.Seconds(), End: ev.End.Seconds(), Speaker: ev.Speaker}
-		if ev.Refined {
-			m.Type, m.Text, m.Part, m.Parts = "refined", ev.Text, ev.Part, ev.Parts
+		if ev.Refined || ev.Unrefined {
+			yes := ev.Refined
+			m.Type, m.Text, m.Part, m.Parts, m.Refined = "refined", ev.Text, ev.Part, ev.Parts, &yes
 		} else if ev.Final {
 			m.Type, m.Text = "final", ev.Text
 		} else {
